@@ -1,0 +1,9 @@
+dist/
+node_modules/
+coverage/
+cdk.out/
+*.tsbuildinfo
+
+# Documentacao e specs sao mantidas com formatacao manual (linhas ~80 col).
+# Prettier foca em codigo (ts/js/json).
+**/*.md
