@@ -5,6 +5,7 @@
     { "path": "./services/identity-access" },
     { "path": "./services/patient-record" },
     { "path": "./services/smart-scheduling" },
-    { "path": "./services/treatment-plan" }
+    { "path": "./services/treatment-plan" },
+    { "path": "./services/finance" }
   ]
 }
