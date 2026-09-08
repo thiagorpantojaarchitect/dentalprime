@@ -45,8 +45,8 @@ export default [
     },
   },
   {
-    // Testes: nao exigir tipo de retorno explicito em helpers locais.
-    files: ["**/*.test.ts"],
+    // Testes e helpers de teste: nao exigir tipo de retorno explicito.
+    files: ["**/*.test.ts", "**/test-helpers.ts"],
     rules: {
       "@typescript-eslint/explicit-function-return-type": "off",
     },

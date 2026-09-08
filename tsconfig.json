@@ -1,4 +1,8 @@
 {
   "files": [],
-  "references": [{ "path": "./packages/core" }, { "path": "./services/identity-access" }]
+  "references": [
+    { "path": "./packages/core" },
+    { "path": "./services/identity-access" },
+    { "path": "./services/patient-record" }
+  ]
 }
