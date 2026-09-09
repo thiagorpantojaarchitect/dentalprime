@@ -162,6 +162,15 @@ describe("ComputeStack", () => {
     t.resourceCountIs("AWS::ECS::Service", BACKEND_SERVICES.length);
     t.resourceCountIs("AWS::ECS::TaskDefinition", BACKEND_SERVICES.length);
   });
+
+  it("cria um repositorio ECR por servico com scan on push", () => {
+    const { compute } = buildProdStacks();
+    const t = Template.fromStack(compute);
+    t.resourceCountIs("AWS::ECR::Repository", BACKEND_SERVICES.length);
+    t.hasResourceProperties("AWS::ECR::Repository", {
+      ImageScanningConfiguration: { ScanOnPush: true },
+    });
+  });
 });
 
 describe("EdgeStack", () => {

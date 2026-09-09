@@ -1,0 +1,92 @@
+# CI: verificacao do monorepo (build, lint, format, testes).
+#
+# Roda em pull requests e em push para main. Nao acessa a AWS nem publica
+# artefatos: apenas valida o codigo (backend, clinic-web e infraestrutura).
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancela execucoes antigas do mesmo ref para economizar recursos.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: build, lint, format e testes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Build (tsc --build dos servicos e packages)
+        run: npm run build
+
+      - name: Build do frontend (clinic-web)
+        run: npm run build --workspace @dentalprime/clinic-web
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Checagem de formatacao
+        run: npm run format:check
+
+      - name: Testes (backend, core e infraestrutura)
+        run: npm test
+
+      - name: Testes do frontend (clinic-web)
+        run: npm test --workspace @dentalprime/clinic-web
+
+  docker-build:
+    name: build das imagens de container (sem publicar)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - { name: identity-access, port: 3001 }
+          - { name: patient-record, port: 3002 }
+          - { name: smart-scheduling, port: 3003 }
+          - { name: treatment-plan, port: 3004 }
+          - { name: finance, port: 3005 }
+          - { name: crm-growth, port: 3006 }
+          - { name: ai-front-desk, port: 3007 }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Valida que a imagem de cada servico builda. Nao faz push (sem registry).
+      - name: Build da imagem ${{ matrix.service.name }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: false
+          build-args: |
+            SERVICE=${{ matrix.service.name }}
+            PORT=${{ matrix.service.port }}
+          tags: dentalprime/${{ matrix.service.name }}:ci
+          cache-from: type=gha,scope=${{ matrix.service.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service.name }}

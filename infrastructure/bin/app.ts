@@ -38,6 +38,10 @@ const requested =
   (app.node.tryGetContext("env") as EnvironmentName | undefined) ?? "development";
 const envConfig = getEnvironmentConfig(requested);
 
+// Tag da imagem a implantar (ex.: -c imageTag=<commit-sha>). Padrao "latest"
+// apenas para sintese local; o pipeline informa a tag imutavel publicada.
+const imageTag = (app.node.tryGetContext("imageTag") as string | undefined) ?? "latest";
+
 // Ambiente CDK (conta/regiao). Conta resolvida do contexto/CLI se ausente.
 const account = envConfig.account ?? process.env.CDK_DEFAULT_ACCOUNT;
 const primaryEnv = { account, region: envConfig.region };
@@ -89,6 +93,7 @@ const compute = new ComputeStack(app, `${prefix}-compute`, {
   databaseEndpoint: data.database.clusterEndpoint.hostname,
   jwtSecretArn: security.jwtSecret.secretArn,
   dataKeyArn: security.dataKey.keyArn,
+  imageTag,
 });
 compute.addStackDependency(data);
 compute.addStackDependency(network);

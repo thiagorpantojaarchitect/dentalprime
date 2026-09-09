@@ -7,12 +7,13 @@
  * sao injetados do Secrets Manager em runtime. Cada servico usa o SG de clientes
  * de dados para acessar banco/cache com privilegio minimo.
  *
- * Nota: a imagem de container e um placeholder (ECR por servico). O pipeline de
- * build/publish das imagens sera definido em iteracao futura.
+ * A imagem de cada servico vem de um repositorio ECR proprio; a tag e
+ * parametrizada (por commit/ambiente) e publicada pelo pipeline de CI/CD.
  */
 
-import { Duration, Stack, type StackProps } from "aws-cdk-lib";
+import { Duration, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
+import * as ecr from "aws-cdk-lib/aws-ecr";
 import * as ecs from "aws-cdk-lib/aws-ecs";
 import * as elbv2 from "aws-cdk-lib/aws-elasticloadbalancingv2";
 import * as iam from "aws-cdk-lib/aws-iam";
@@ -45,11 +46,18 @@ export interface ComputeStackProps extends StackProps {
   readonly jwtSecretArn: string;
   /** ARN da chave KMS que cifra os segredos (para conceder decrypt as tasks). */
   readonly dataKeyArn: string;
+  /**
+   * Tag da imagem de container a implantar (ex.: commit SHA). Publicada pelo
+   * pipeline no ECR. Padrao "latest" apenas para sintese local.
+   */
+  readonly imageTag?: string;
 }
 
 export class ComputeStack extends Stack {
   public readonly cluster: ecs.Cluster;
   public readonly loadBalancer: elbv2.ApplicationLoadBalancer;
+  /** Repositorios ECR por servico (a imagem e publicada pelo pipeline). */
+  public readonly repositories: Record<string, ecr.Repository> = {};
 
   constructor(scope: Construct, id: string, props: ComputeStackProps) {
     super(scope, id, props);
@@ -63,6 +71,7 @@ export class ComputeStack extends Stack {
       databaseEndpoint,
       jwtSecretArn,
       dataKeyArn,
+      imageTag = "latest",
     } = props;
     const suffix = envConfig.name;
 
@@ -141,6 +150,18 @@ export class ComputeStack extends Stack {
         removalPolicy: envConfig.removalPolicy,
       });
 
+      // Repositorio ECR do servico: scan on push e limpeza de imagens antigas.
+      const repository = new ecr.Repository(this, `${service.name}-Repo`, {
+        repositoryName: `${RESOURCE_PREFIX}/${service.name}`,
+        imageScanOnPush: true,
+        imageTagMutability: ecr.TagMutability.IMMUTABLE,
+        encryption: ecr.RepositoryEncryption.KMS,
+        removalPolicy: envConfig.removalPolicy,
+        emptyOnDelete: envConfig.removalPolicy === RemovalPolicy.DESTROY,
+        lifecycleRules: [{ maxImageCount: 20 }],
+      });
+      this.repositories[service.name] = repository;
+
       const taskDefinition = new ecs.FargateTaskDefinition(this, `${service.name}-Task`, {
         family: `${RESOURCE_PREFIX}-${service.name}-${suffix}`,
         cpu: 256,
@@ -160,10 +181,8 @@ export class ComputeStack extends Stack {
       taskDefinition.addToExecutionRolePolicy(kmsDecrypt);
 
       const container = taskDefinition.addContainer("app", {
-        // Placeholder: substituir pela imagem do ECR do servico no pipeline.
-        image: ecs.ContainerImage.fromRegistry(
-          `public.ecr.aws/docker/library/node:22-alpine`,
-        ),
+        // Imagem publicada pelo pipeline no ECR do servico, na tag informada.
+        image: ecs.ContainerImage.fromEcrRepository(repository, imageTag),
         containerName: service.name,
         logging: ecs.LogDrivers.awsLogs({ streamPrefix: service.name, logGroup }),
         environment: {

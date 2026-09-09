@@ -1,0 +1,44 @@
+# Mantem o contexto de build enxuto e sem segredos.
+
+# Dependencias e artefatos (reconstruidos na imagem)
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+**/coverage
+**/.vitest
+
+# IaC e saidas de sintese (nao vao para imagens de servico)
+infrastructure/cdk.out
+**/cdk.out
+
+# Frontend (buildado/deployado separadamente)
+apps/clinic-web/dist
+apps/clinic-web/.vite
+
+# Segredos e ambiente (NUNCA na imagem)
+**/.env
+**/.env.*
+!**/.env.example
+**/*.pem
+**/*.key
+**/credentials.json
+**/secrets.json
+
+# Controle de versao e metadados
+.git
+.gitignore
+.github
+
+# Editores e SO
+**/.DS_Store
+**/.idea
+**/*.swp
+**/*.log
+
+# Documentacao e specs (nao necessarios em runtime)
+documentation
+.kiro
+
+# Testes (nao vao para a imagem de runtime; ainda assim o build compila sem eles)
+**/*.test.ts
+**/*.spec.ts

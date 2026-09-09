@@ -83,6 +83,16 @@ const COMMON_ACKS: readonly Ack[] = [
     reason:
       "Redis AUTH sera habilitado com token no Secrets Manager em iteracao posterior; criptografia em repouso e em transito ja estao habilitadas e o acesso e restrito por SG em subnet isolada.",
   },
+  {
+    // Finding granular: Resource::* na policy da execution role. A acao
+    // ecr:GetAuthorizationToken NAO suporta escopo por recurso (exigencia da
+    // API da AWS), por isso resolve para Resource::*. As demais permissoes
+    // (pull da imagem, escrita de logs) sao escopadas ao repositorio/log group
+    // pelos constructos do CDK.
+    id: "AwsSolutions-IAM5[Resource::*]",
+    reason:
+      "ecr:GetAuthorizationToken exige Resource '*' por design da API da AWS. Pull de imagem e escrita de logs ja sao escopados pelo CDK ao repositorio ECR e ao log group do servico.",
+  },
 ];
 
 /** Reconhecimentos aplicaveis apenas fora de producao (recursos reduzidos). */
