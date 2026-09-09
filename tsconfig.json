@@ -6,6 +6,7 @@
     { "path": "./services/patient-record" },
     { "path": "./services/smart-scheduling" },
     { "path": "./services/treatment-plan" },
-    { "path": "./services/finance" }
+    { "path": "./services/finance" },
+    { "path": "./services/crm-growth" }
   ]
 }
