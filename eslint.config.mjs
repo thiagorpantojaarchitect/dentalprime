@@ -9,12 +9,13 @@ export default [
   },
   js.configs.recommended,
   {
-    files: ["**/*.ts"],
+    files: ["**/*.ts", "**/*.tsx"],
     languageOptions: {
       parser: tsparser,
       parserOptions: {
         ecmaVersion: 2022,
         sourceType: "module",
+        ecmaFeatures: { jsx: true },
       },
       // Globais do runtime Node (Node 22) e de teste (Vitest injeta globals).
       globals: {
@@ -50,8 +51,27 @@ export default [
     },
   },
   {
+    // Frontend (clinic-web): roda no browser. Habilita globais de DOM/Web.
+    files: ["apps/clinic-web/**/*.ts", "apps/clinic-web/**/*.tsx"],
+    languageOptions: {
+      globals: {
+        window: "readonly",
+        document: "readonly",
+        localStorage: "readonly",
+        fetch: "readonly",
+        Response: "readonly",
+        Request: "readonly",
+        RequestInit: "readonly",
+        RequestInfo: "readonly",
+        Headers: "readonly",
+        HTMLElement: "readonly",
+        JSX: "readonly",
+      },
+    },
+  },
+  {
     // Testes e helpers de teste: nao exigir tipo de retorno explicito.
-    files: ["**/*.test.ts", "**/test-helpers.ts"],
+    files: ["**/*.test.ts", "**/*.test.tsx", "**/test-helpers.ts"],
     rules: {
       "@typescript-eslint/explicit-function-return-type": "off",
     },
