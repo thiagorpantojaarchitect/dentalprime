@@ -1,0 +1,25 @@
+{
+  "name": "@dentalprime/infrastructure",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Infraestrutura como codigo (AWS CDK) do DentalPrime",
+  "type": "commonjs",
+  "bin": {
+    "dentalprime-infra": "bin/app.ts"
+  },
+  "scripts": {
+    "synth": "cdk synth",
+    "diff": "cdk diff",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.268.0",
+    "cdk-nag": "3.0.2",
+    "constructs": "10.5.1"
+  },
+  "devDependencies": {
+    "aws-cdk": "2.1131.0",
+    "tsx": "4.19.2"
+  }
+}
