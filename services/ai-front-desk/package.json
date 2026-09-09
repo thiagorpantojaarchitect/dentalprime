@@ -1,0 +1,33 @@
+{
+  "name": "@dentalprime/ai-front-desk",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run",
+    "db:generate": "drizzle-kit generate",
+    "dev": "node --watch --experimental-strip-types src/main.ts"
+  },
+  "dependencies": {
+    "@dentalprime/core": "*",
+    "drizzle-orm": "0.38.3",
+    "fastify": "5.2.1",
+    "fastify-plugin": "5.0.1",
+    "jose": "5.9.6",
+    "pg": "8.13.1",
+    "zod": "3.24.1"
+  },
+  "devDependencies": {
+    "@types/pg": "8.11.10",
+    "drizzle-kit": "0.30.1"
+  }
+}

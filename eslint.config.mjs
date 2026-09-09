@@ -42,6 +42,11 @@ export default [
         "warn",
         { allowExpressions: true },
       ],
+      // Permite parametros/variaveis intencionalmente nao usados com prefixo "_".
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
+      ],
     },
   },
   {
