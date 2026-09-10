@@ -6,15 +6,19 @@
  */
 
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
-import { Pool } from "pg";
+// "pg" e um modulo CommonJS: sob ESM, importar via default e desestruturar.
+// O import nomeado (`import { Pool } from "pg"`) quebra em runtime.
+import pg from "pg";
 
 import * as schema from "./schema.js";
+
+const { Pool } = pg;
 
 export type Database = NodePgDatabase<typeof schema>;
 
 export interface DbConnection {
   readonly db: Database;
-  readonly pool: Pool;
+  readonly pool: pg.Pool;
 }
 
 /**

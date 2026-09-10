@@ -1,0 +1,111 @@
+# Deploy: implantacao na AWS com aprovacao por ambiente.
+#
+# Acionado MANUALMENTE (workflow_dispatch). A aprovacao e feita pela protecao do
+# GitHub Environment escolhido (required reviewers configurados no repositorio):
+# o job so executa apos aprovacao humana. Producao deve ter reviewers extras.
+#
+# Ordem: (1) migracoes de banco (ECS RunTask, RUN_MODE=migrate) e (2) cdk deploy
+# dos stacks com a tag de imagem do commit. Autenticacao por OIDC (sem chaves
+# estaticas), com uma role de DEPLOY dedicada (privilegios maiores que a de CI).
+#
+# Autenticar aqui nao concede permissao de deploy fora deste fluxo controlado.
+
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Ambiente alvo do deploy
+        type: choice
+        options: [development, staging, production]
+        default: development
+      imageTag:
+        description: Tag da imagem no ECR (padrao - SHA do commit atual)
+        type: string
+        required: false
+
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: sa-east-1
+  CLUSTER: dentalprime-cluster-${{ inputs.environment }}
+
+jobs:
+  deploy:
+    name: deploy (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # A protecao deste Environment (required reviewers) e o gate de aprovacao.
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Definir a tag da imagem
+        id: image
+        run: echo "tag=${{ inputs.imageTag || github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Autenticar na AWS (OIDC, role de deploy)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE || format('arn:aws:iam::{0}:role/dentalprime-deploy-{1}', vars.AWS_ACCOUNT_ID, inputs.environment) }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Migracoes ANTES de rotar os servicos. Cada task de migracao e idempotente
+      # (Drizzle so aplica o que falta) e encerra ao concluir.
+      - name: Aplicar migracoes de banco
+        run: |
+          set -euo pipefail
+          SERVICES="identity-access patient-record smart-scheduling treatment-plan finance crm-growth ai-front-desk"
+          # Subnets privadas e SG dos servicos vem de variaveis do ambiente.
+          SUBNETS="${{ vars.PRIVATE_SUBNET_IDS }}"
+          SG="${{ vars.SERVICE_SECURITY_GROUP_ID }}"
+          if [ -z "$SUBNETS" ] || [ -z "$SG" ]; then
+            echo "Configure as variaveis PRIVATE_SUBNET_IDS e SERVICE_SECURITY_GROUP_ID no Environment." >&2
+            exit 1
+          fi
+          NETCFG="awsvpcConfiguration={subnets=[${SUBNETS}],securityGroups=[${SG}],assignPublicIp=DISABLED}"
+          for svc in $SERVICES; do
+            TASKDEF="dentalprime-${svc}-migrate-${{ inputs.environment }}"
+            echo "== Migrando ${svc} (${TASKDEF}) =="
+            TASK_ARN=$(aws ecs run-task \
+              --cluster "$CLUSTER" \
+              --task-definition "$TASKDEF" \
+              --launch-type FARGATE \
+              --network-configuration "$NETCFG" \
+              --query 'tasks[0].taskArn' --output text)
+            echo "Aguardando conclusao de ${TASK_ARN}"
+            aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK_ARN"
+            EXIT_CODE=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" \
+              --query 'tasks[0].containers[0].exitCode' --output text)
+            if [ "$EXIT_CODE" != "0" ]; then
+              echo "Migracao de ${svc} falhou (exitCode=${EXIT_CODE})." >&2
+              exit 1
+            fi
+          done
+
+      # Implanta a infraestrutura/servicos com a tag da imagem deste deploy.
+      # A aprovacao ja ocorreu no gate do Environment; sem prompt interativo.
+      - name: cdk deploy
+        working-directory: infrastructure
+        run: >-
+          npx cdk deploy --all
+          -c env=${{ inputs.environment }}
+          -c imageTag=${{ steps.image.outputs.tag }}
+          --require-approval never

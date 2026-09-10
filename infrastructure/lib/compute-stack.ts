@@ -11,7 +11,7 @@
  * parametrizada (por commit/ambiente) e publicada pelo pipeline de CI/CD.
  */
 
-import { Duration, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
+import { CfnOutput, Duration, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as ecr from "aws-cdk-lib/aws-ecr";
 import * as ecs from "aws-cdk-lib/aws-ecs";
@@ -58,6 +58,9 @@ export class ComputeStack extends Stack {
   public readonly loadBalancer: elbv2.ApplicationLoadBalancer;
   /** Repositorios ECR por servico (a imagem e publicada pelo pipeline). */
   public readonly repositories: Record<string, ecr.Repository> = {};
+  /** Task definitions de migracao por servico (executadas como RunTask). */
+  public readonly migrationTaskDefinitions: Record<string, ecs.FargateTaskDefinition> =
+    {};
 
   constructor(scope: Construct, id: string, props: ComputeStackProps) {
     super(scope, id, props);
@@ -180,27 +183,92 @@ export class ComputeStack extends Stack {
       taskDefinition.taskRole.addToPrincipalPolicy(kmsDecrypt);
       taskDefinition.addToExecutionRolePolicy(kmsDecrypt);
 
+      // Imagem e configuracao compartilhadas entre o servico e a task de
+      // migracao (mesma imagem; a task de migracao troca RUN_MODE).
+      const image = ecs.ContainerImage.fromEcrRepository(repository, imageTag);
+      const baseEnvironment: Record<string, string> = {
+        NODE_ENV: "production",
+        PORT: String(service.port),
+        // Host/porta/banco nao sao segredos; usuario e senha vem do secret.
+        DATABASE_HOST: databaseEndpoint,
+        DATABASE_PORT: "5432",
+        DATABASE_NAME,
+        // Tracing OTLP para o sidecar ADOT (collector local na task).
+        OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4318",
+        OTEL_SERVICE_NAME: service.name,
+      };
+      const baseSecrets: Record<string, ecs.Secret> = {
+        // Injetados do Secrets Manager em runtime; nunca em texto plano.
+        DATABASE_USERNAME: ecs.Secret.fromSecretsManager(dbCredentials, "username"),
+        DATABASE_PASSWORD: ecs.Secret.fromSecretsManager(dbCredentials, "password"),
+        JWT_SECRET: ecs.Secret.fromSecretsManager(jwtSecret),
+      };
+
       const container = taskDefinition.addContainer("app", {
-        // Imagem publicada pelo pipeline no ECR do servico, na tag informada.
-        image: ecs.ContainerImage.fromEcrRepository(repository, imageTag),
+        image,
         containerName: service.name,
         logging: ecs.LogDrivers.awsLogs({ streamPrefix: service.name, logGroup }),
-        environment: {
-          NODE_ENV: "production",
-          PORT: String(service.port),
-          // Host/porta/banco nao sao segredos; usuario e senha vem do secret.
-          DATABASE_HOST: databaseEndpoint,
-          DATABASE_PORT: "5432",
-          DATABASE_NAME,
-        },
-        secrets: {
-          // Injetados do Secrets Manager em runtime; nunca em texto plano.
-          DATABASE_USERNAME: ecs.Secret.fromSecretsManager(dbCredentials, "username"),
-          DATABASE_PASSWORD: ecs.Secret.fromSecretsManager(dbCredentials, "password"),
-          JWT_SECRET: ecs.Secret.fromSecretsManager(jwtSecret),
-        },
+        environment: baseEnvironment,
+        secrets: baseSecrets,
       });
       container.addPortMappings({ containerPort: service.port });
+
+      // Sidecar ADOT (AWS Distro for OpenTelemetry): recebe OTLP do app em
+      // localhost e exporta traces para o X-Ray e metricas para o CloudWatch.
+      taskDefinition.addContainer("adot", {
+        image: ecs.ContainerImage.fromRegistry(
+          "public.ecr.aws/aws-observability/aws-otel-collector:latest",
+        ),
+        containerName: "adot-collector",
+        command: ["--config=/etc/ecs/ecs-default-config.yaml"],
+        essential: false,
+        logging: ecs.LogDrivers.awsLogs({
+          streamPrefix: `${service.name}-adot`,
+          logGroup,
+        }),
+      });
+      // O collector publica traces no X-Ray e metricas no CloudWatch. Em vez de
+      // politicas gerenciadas amplas, concedemos as acoes minimas necessarias.
+      // Essas acoes nao suportam escopo por recurso (exigencia da API), entao
+      // usam Resource '*' (reconhecido em nag-acknowledgements como IAM5).
+      taskDefinition.taskRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          actions: [
+            "xray:PutTraceSegments",
+            "xray:PutTelemetryRecords",
+            "xray:GetSamplingRules",
+            "xray:GetSamplingTargets",
+            "xray:GetSamplingStatisticSummaries",
+            "cloudwatch:PutMetricData",
+          ],
+          resources: ["*"],
+        }),
+      );
+
+      // Task de migracao (one-off): mesma imagem, RUN_MODE=migrate. Executada
+      // como RunTask antes de rotar as tasks do servico (ver deployment.md).
+      const migrationTask = new ecs.FargateTaskDefinition(
+        this,
+        `${service.name}-MigrationTask`,
+        {
+          family: `${RESOURCE_PREFIX}-${service.name}-migrate-${suffix}`,
+          cpu: 256,
+          memoryLimitMiB: 512,
+        },
+      );
+      migrationTask.taskRole.addToPrincipalPolicy(kmsDecrypt);
+      migrationTask.addToExecutionRolePolicy(kmsDecrypt);
+      migrationTask.addContainer("migrate", {
+        image,
+        containerName: `${service.name}-migrate`,
+        logging: ecs.LogDrivers.awsLogs({
+          streamPrefix: `${service.name}-migrate`,
+          logGroup,
+        }),
+        environment: { ...baseEnvironment, RUN_MODE: "migrate" },
+        secrets: baseSecrets,
+      });
+      this.migrationTaskDefinitions[service.name] = migrationTask;
 
       const fargateService = new ecs.FargateService(this, `${service.name}-Service`, {
         serviceName: `${RESOURCE_PREFIX}-${service.name}-${suffix}`,
@@ -243,5 +311,15 @@ export class ComputeStack extends Stack {
         });
       }
     }
+
+    // Saidas usadas pelo workflow de deploy (run-task de migracao).
+    new CfnOutput(this, "ClusterName", {
+      value: this.cluster.clusterName,
+      description: "Nome do cluster ECS",
+    });
+    new CfnOutput(this, "ServiceSecurityGroupId", {
+      value: serviceSecurityGroup.securityGroupId,
+      description: "SG das tasks de backend (usar no run-task de migracao)",
+    });
   }
 }

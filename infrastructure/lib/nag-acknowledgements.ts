@@ -91,7 +91,7 @@ const COMMON_ACKS: readonly Ack[] = [
     // pelos constructos do CDK.
     id: "AwsSolutions-IAM5[Resource::*]",
     reason:
-      "ecr:GetAuthorizationToken exige Resource '*' por design da API da AWS. Pull de imagem e escrita de logs ja sao escopados pelo CDK ao repositorio ECR e ao log group do servico.",
+      "Acoes que nao suportam escopo por recurso (design da API da AWS): ecr:GetAuthorizationToken, xray:Put*/Get* e cloudwatch:PutMetricData (usadas pelo coletor ADOT). Pull de imagem e escrita de logs ja sao escopados pelo CDK ao repositorio ECR e ao log group.",
   },
 ];
 

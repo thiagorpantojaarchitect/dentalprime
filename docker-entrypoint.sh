@@ -36,7 +36,23 @@ if [ -z "${DATABASE_URL:-}" ]; then
   export DATABASE_URL="postgresql://${DATABASE_USERNAME}:${DATABASE_PASSWORD}@${DATABASE_HOST}:${db_port}/${DATABASE_NAME}?sslmode=${sslmode}"
 fi
 
-# Nao logamos DATABASE_URL nem segredos. Apenas um indicativo de inicializacao.
-echo "Iniciando servico ${SERVICE:-desconhecido} na porta ${PORT:-3000}"
+# Modo de execucao: "serve" (padrao) inicia o servidor HTTP; "migrate" aplica as
+# migracoes do banco e encerra. A mesma imagem serve os dois casos; o CDK apenas
+# troca RUN_MODE na task de migracao.
+run_mode="${RUN_MODE:-serve}"
 
-exec node "services/${SERVICE}/dist/main.js"
+case "$run_mode" in
+  migrate)
+    echo "Aplicando migracoes do servico ${SERVICE:-desconhecido}"
+    exec node "services/${SERVICE}/dist/migrate.js"
+    ;;
+  serve)
+    # Nao logamos DATABASE_URL nem segredos. Apenas um indicativo de inicializacao.
+    echo "Iniciando servico ${SERVICE:-desconhecido} na porta ${PORT:-3000}"
+    exec node "services/${SERVICE}/dist/main.js"
+    ;;
+  *)
+    echo "RUN_MODE invalido: ${run_mode} (use 'serve' ou 'migrate')" >&2
+    exit 1
+    ;;
+esac

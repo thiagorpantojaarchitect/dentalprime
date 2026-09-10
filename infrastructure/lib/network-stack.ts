@@ -7,7 +7,7 @@
  * publica.
  */
 
-import { Stack, type StackProps } from "aws-cdk-lib";
+import { CfnOutput, Stack, type StackProps } from "aws-cdk-lib";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import type { Construct } from "constructs";
 
@@ -78,5 +78,13 @@ export class NetworkStack extends Stack {
         privateDnsEnabled: true,
       });
     }
+
+    // Saida usada pelo workflow de deploy (rede do run-task de migracao).
+    new CfnOutput(this, "PrivateSubnetIds", {
+      value: this.vpc
+        .selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS })
+        .subnetIds.join(","),
+      description: "IDs das subnets privadas (compute)",
+    });
   }
 }

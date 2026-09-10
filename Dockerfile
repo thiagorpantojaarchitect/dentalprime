@@ -54,6 +54,8 @@ COPY --from=build /app/packages/core/package.json ./packages/core/package.json
 COPY --from=build /app/packages/core/dist ./packages/core/dist
 COPY --from=build /app/services/${SERVICE}/package.json ./services/${SERVICE}/package.json
 COPY --from=build /app/services/${SERVICE}/dist ./services/${SERVICE}/dist
+# Migracoes SQL (drizzle) usadas pelo runner de migracao dist/migrate.js.
+COPY --from=build /app/services/${SERVICE}/drizzle ./services/${SERVICE}/drizzle
 
 # Entrypoint que monta DATABASE_URL e inicia o processo.
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh

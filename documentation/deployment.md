@@ -79,15 +79,71 @@ revisao do diff e aprovacao.
   push no ECR e leitura para `cdk diff`. A role e criada fora deste fluxo (IaC
   de bootstrap ou processo de seguranca), nunca com chaves estaticas.
 
-## Deploy (fora do pipeline automatico)
+## Migracoes de banco
 
-O deploy usa perfis/funcoes IAM dedicados por ambiente, com aprovacao explicita:
+Cada servico tem migracoes SQL geradas pelo Drizzle (`services/<servico>/drizzle`)
+e um runner idempotente (`dist/migrate.js`) que aplica apenas o que falta,
+mantendo uma tabela de controle. A mesma imagem de container roda em dois modos,
+selecionados pela variavel `RUN_MODE`:
+
+- `serve` (padrao) — inicia o servidor HTTP.
+- `migrate` — aplica as migracoes e encerra.
+
+O `ComputeStack` cria, por servico, uma task definition de migracao
+(`dentalprime-<servico>-migrate-<env>`) com `RUN_MODE=migrate`, os mesmos
+segredos e a mesma imagem do servico.
+
+### Ordem no deploy
+
+As migracoes devem ser aplicadas **antes** de rotar as tasks dos servicos:
 
 ```bash
-# Exemplo (executado por operador autorizado, apos aprovar o diff):
+# 1) Aplicar migracoes (RunTask one-off) para cada servico, ex.:
+aws ecs run-task \
+  --cluster dentalprime-cluster-staging \
+  --task-definition dentalprime-identity-access-migrate-staging \
+  --launch-type FARGATE \
+  --network-configuration "awsvpcConfiguration={subnets=[<privadas>],securityGroups=[<sg-servicos>],assignPublicIp=DISABLED}"
+
+# 2) Depois, implantar/rotar os servicos (cdk deploy do compute).
+```
+
+Regra de seguranca clinica: migracoes preservam o historico; alteracoes de
+schema em dados clinicos nao removem informacao de forma destrutiva.
+
+## Deploy com aprovacao (`deploy.yml`)
+
+O deploy e um workflow manual (`workflow_dispatch`) com gate de aprovacao pela
+protecao de **GitHub Environments**. O job so executa apos aprovacao humana dos
+reviewers configurados no Environment escolhido.
+
+Fluxo do workflow:
+
+1. Autentica na AWS por OIDC com uma role de **deploy** dedicada por ambiente
+   (`AWS_DEPLOY_ROLE` ou o padrao `dentalprime-deploy-<env>`), separada da role
+   de CI/ECR.
+2. Aplica as **migracoes** de cada servico via `aws ecs run-task` e aguarda a
+   conclusao (falha o deploy se alguma migracao retornar exitCode != 0).
+3. Executa `cdk deploy --all` com a tag de imagem do deploy.
+
+### Configuracao necessaria (por Environment do GitHub)
+
+- Protecao do Environment com **required reviewers** (obrigatorio para `staging`
+  e `production`; producao com reviewers adicionais).
+- Variaveis do Environment: `AWS_ACCOUNT_ID`, opcional `AWS_DEPLOY_ROLE`,
+  `PRIVATE_SUBNET_IDS` (lista separada por virgula) e
+  `SERVICE_SECURITY_GROUP_ID` (SG das tasks, saida do ComputeStack).
+
+### Deploy manual (operador autorizado)
+
+Alternativa fora do pipeline, apos aprovar o `cdk diff`:
+
+```bash
 cd infrastructure
-npx cdk deploy -c env=staging -c imageTag=<sha> --all
+# 1) migracoes (uma por servico), depois:
+npx cdk deploy --all -c env=staging -c imageTag=<sha> --require-approval never
 ```
 
 Producao exige aprovacao adicional e respeita a residencia de dados em
-`sa-east-1`. Recursos stateful tem protecao de remocao habilitada.
+`sa-east-1`. Recursos stateful tem protecao de remocao habilitada. Autenticar no
+Kiro ou no CI nao concede permissao de deploy: o deploy usa roles IAM dedicadas.

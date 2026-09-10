@@ -7,3 +7,6 @@ cdk.out/
 # Documentacao e specs sao mantidas com formatacao manual (linhas ~80 col).
 # Prettier foca em codigo (ts/js/json).
 **/*.md
+
+# Migracoes e metadados gerados pelo drizzle-kit (nao editar/formatar).
+**/drizzle/

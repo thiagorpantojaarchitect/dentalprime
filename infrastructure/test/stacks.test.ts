@@ -1,5 +1,5 @@
 import { App } from "aws-cdk-lib";
-import { Template } from "aws-cdk-lib/assertions";
+import { Match, Template } from "aws-cdk-lib/assertions";
 import { describe, it, expect } from "vitest";
 
 import { getEnvironmentConfig, allEnvironments } from "../lib/config/environments.js";
@@ -160,7 +160,47 @@ describe("ComputeStack", () => {
     t.resourceCountIs("AWS::ECS::Cluster", 1);
     t.resourceCountIs("AWS::ElasticLoadBalancingV2::LoadBalancer", 1);
     t.resourceCountIs("AWS::ECS::Service", BACKEND_SERVICES.length);
-    t.resourceCountIs("AWS::ECS::TaskDefinition", BACKEND_SERVICES.length);
+    // Uma task definition de servico + uma de migracao por dominio.
+    t.resourceCountIs("AWS::ECS::TaskDefinition", BACKEND_SERVICES.length * 2);
+  });
+
+  it("cria uma task de migracao por servico com RUN_MODE=migrate", () => {
+    const { compute } = buildProdStacks();
+    const t = Template.fromStack(compute);
+    t.hasResourceProperties("AWS::ECS::TaskDefinition", {
+      ContainerDefinitions: [
+        {
+          Environment: Match.arrayWith([{ Name: "RUN_MODE", Value: "migrate" }]),
+        },
+      ],
+    });
+  });
+
+  it("cada servico de backend roda um sidecar ADOT", () => {
+    const { compute } = buildProdStacks();
+    const t = Template.fromStack(compute);
+    t.hasResourceProperties("AWS::ECS::TaskDefinition", {
+      ContainerDefinitions: Match.arrayWith([
+        Match.objectLike({
+          Name: "adot-collector",
+          Image: Match.stringLikeRegexp("aws-otel-collector"),
+        }),
+      ]),
+    });
+  });
+
+  it("o container do app aponta o OTLP para o sidecar local", () => {
+    const { compute } = buildProdStacks();
+    const t = Template.fromStack(compute);
+    t.hasResourceProperties("AWS::ECS::TaskDefinition", {
+      ContainerDefinitions: Match.arrayWith([
+        Match.objectLike({
+          Environment: Match.arrayWith([
+            { Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Value: "http://localhost:4318" },
+          ]),
+        }),
+      ]),
+    });
   });
 
   it("cria um repositorio ECR por servico com scan on push", () => {
