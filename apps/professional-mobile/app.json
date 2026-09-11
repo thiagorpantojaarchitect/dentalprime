@@ -1,0 +1,21 @@
+{
+  "expo": {
+    "name": "DentalPrime Profissional",
+    "slug": "dentalprime-professional",
+    "scheme": "dentalprime-professional",
+    "version": "0.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "primaryColor": "#0a7d78",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.dentalprime.professional"
+    },
+    "android": { "package": "com.dentalprime.professional" },
+    "extra": {
+      "identityUrl": "http://localhost:3001",
+      "patientUrl": "http://localhost:3002",
+      "schedulingUrl": "http://localhost:3003"
+    }
+  }
+}

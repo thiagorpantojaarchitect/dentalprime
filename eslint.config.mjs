@@ -5,7 +5,17 @@ import prettier from "eslint-config-prettier";
 
 export default [
   {
-    ignores: ["**/dist/**", "**/node_modules/**", "**/coverage/**", "**/cdk.out/**"],
+    ignores: [
+      "**/dist/**",
+      "**/node_modules/**",
+      "**/coverage/**",
+      "**/cdk.out/**",
+      // Apps mobile (Expo/React Native) tem toolchain proprio (expo lint) e
+      // dependencias nativas nao instaladas no monorepo web/backend. Excluidos
+      // do lint da raiz; a logica testavel vive em packages/mobile-core.
+      "apps/patient-mobile/**",
+      "apps/professional-mobile/**",
+    ],
   },
   js.configs.recommended,
   {
@@ -48,6 +58,20 @@ export default [
         "error",
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
       ],
+    },
+  },
+  {
+    // mobile-core: TS puro que roda em Node (testes) e React Native (runtime).
+    // Ambos expoem fetch/Response. Habilita esses globais de rede.
+    files: ["packages/mobile-core/**/*.ts"],
+    languageOptions: {
+      globals: {
+        fetch: "readonly",
+        Response: "readonly",
+        Request: "readonly",
+        RequestInit: "readonly",
+        Headers: "readonly",
+      },
     },
   },
   {

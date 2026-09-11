@@ -10,7 +10,8 @@
   "workspaces": [
     "packages/*",
     "services/*",
-    "apps/*",
+    "apps/clinic-web",
+    "apps/admin-portal",
     "infrastructure"
   ],
   "scripts": {

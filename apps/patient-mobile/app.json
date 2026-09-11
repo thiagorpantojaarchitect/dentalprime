@@ -1,0 +1,18 @@
+{
+  "expo": {
+    "name": "DentalPrime Paciente",
+    "slug": "dentalprime-patient",
+    "scheme": "dentalprime-patient",
+    "version": "0.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "primaryColor": "#0a7d78",
+    "ios": { "supportsTablet": true, "bundleIdentifier": "com.dentalprime.patient" },
+    "android": { "package": "com.dentalprime.patient" },
+    "extra": {
+      "identityUrl": "http://localhost:3001",
+      "patientUrl": "http://localhost:3002",
+      "schedulingUrl": "http://localhost:3003"
+    }
+  }
+}
