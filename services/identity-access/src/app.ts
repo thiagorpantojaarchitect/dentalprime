@@ -9,6 +9,7 @@ import rateLimit from "@fastify/rate-limit";
 import Fastify, { type FastifyInstance } from "fastify";
 
 import type { AuthService } from "./application/auth-service.js";
+import type { NetworkService } from "./application/network-service.js";
 import type { TokenService } from "./application/tokens.js";
 import type { UserService } from "./application/user-service.js";
 import { authPlugin } from "./api/auth-plugin.js";
@@ -18,6 +19,7 @@ import { registerRoutes } from "./api/routes.js";
 export interface AppDeps {
   readonly auth: AuthService;
   readonly users: UserService;
+  readonly network: NetworkService;
   readonly tokens: TokenService;
   readonly loginRateLimitPerMinute: number;
 }
@@ -42,6 +44,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     await registerRoutes(instance, {
       auth: deps.auth,
       users: deps.users,
+      network: deps.network,
       loginRateLimitPerMinute: deps.loginRateLimitPerMinute,
     });
   });

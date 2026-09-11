@@ -51,8 +51,8 @@ export default [
     },
   },
   {
-    // Frontend (clinic-web): roda no browser. Habilita globais de DOM/Web.
-    files: ["apps/clinic-web/**/*.ts", "apps/clinic-web/**/*.tsx"],
+    // Frontends (apps/*): rodam no browser. Habilita globais de DOM/Web.
+    files: ["apps/**/*.ts", "apps/**/*.tsx"],
     languageOptions: {
       globals: {
         window: "readonly",

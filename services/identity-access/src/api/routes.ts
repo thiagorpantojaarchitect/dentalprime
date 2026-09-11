@@ -11,6 +11,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
 import type { AuthService } from "../application/auth-service.js";
+import type { NetworkService } from "../application/network-service.js";
 import type { UserService } from "../application/user-service.js";
 import { requireContext } from "./auth-plugin.js";
 import { sendError } from "./errors.js";
@@ -54,9 +55,20 @@ const changeRoleSchema = z.object({
   unitId: z.string().uuid().nullable(),
 });
 
+const provisionTenantSchema = z.object({
+  name: z.string().min(1),
+  ownerEmail: z.string().email(),
+  ownerName: z.string().min(1),
+});
+
+const createUnitSchema = z.object({ name: z.string().min(1) });
+
+const unitIdParam = z.object({ unitId: z.string().uuid() });
+
 export interface RouteDeps {
   readonly auth: AuthService;
   readonly users: UserService;
+  readonly network: NetworkService;
   readonly loginRateLimitPerMinute: number;
 }
 
@@ -227,4 +239,120 @@ export async function registerRoutes(
       }
     },
   );
+
+  // --- Rede: tenants, unidades e visao de usuarios (admin-portal) ---
+
+  fastify.post(
+    "/tenants",
+    { preHandler: fastify.authenticate },
+    async (request, reply) => {
+      const parsed = provisionTenantSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply
+          .status(400)
+          .send({ error: { code: "VALIDATION", message: "Dados invalidos." } });
+      }
+      try {
+        const result = await deps.network.provisionTenant(requireContext(request), {
+          name: parsed.data.name,
+          ownerEmail: parsed.data.ownerEmail,
+          ownerName: parsed.data.ownerName,
+        });
+        return reply.status(201).send({
+          id: result.tenant.id,
+          name: result.tenant.name,
+          ownerUserId: result.ownerUserId,
+        });
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
+
+  fastify.get(
+    "/tenants",
+    { preHandler: fastify.authenticate },
+    async (request, reply) => {
+      try {
+        const tenants = await deps.network.listTenants(requireContext(request));
+        return reply.send({ tenants });
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
+
+  fastify.get(
+    "/tenants/current",
+    { preHandler: fastify.authenticate },
+    async (request, reply) => {
+      try {
+        const tenant = await deps.network.currentTenant(requireContext(request));
+        return reply.send(tenant);
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
+
+  fastify.post("/units", { preHandler: fastify.authenticate }, async (request, reply) => {
+    const parsed = createUnitSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply
+        .status(400)
+        .send({ error: { code: "VALIDATION", message: "Dados invalidos." } });
+    }
+    try {
+      const unit = await deps.network.createUnit(
+        requireContext(request),
+        parsed.data.name,
+      );
+      return reply
+        .status(201)
+        .send({ id: unit.id, name: unit.name, active: unit.active });
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  fastify.get("/units", { preHandler: fastify.authenticate }, async (request, reply) => {
+    try {
+      const units = await deps.network.listUnits(requireContext(request));
+      return reply.send({ units });
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  fastify.post(
+    "/units/:unitId/deactivate",
+    { preHandler: fastify.authenticate },
+    async (request, reply) => {
+      const params = unitIdParam.safeParse(request.params);
+      if (!params.success) {
+        return reply
+          .status(400)
+          .send({ error: { code: "VALIDATION", message: "Dados invalidos." } });
+      }
+      try {
+        await deps.network.setUnitActive(
+          requireContext(request),
+          params.data.unitId,
+          false,
+        );
+        return reply.status(204).send();
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
+
+  fastify.get("/users", { preHandler: fastify.authenticate }, async (request, reply) => {
+    try {
+      const users = await deps.network.listUsers(requireContext(request));
+      return reply.send({ users });
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
 }

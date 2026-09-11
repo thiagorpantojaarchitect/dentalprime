@@ -5,6 +5,21 @@
 
 import type { ClinicUnitId, Role, TenantId, UserId } from "@dentalprime/core";
 
+/** Tenant: clinica ou rede. Raiz do isolamento multi-tenant. */
+export interface Tenant {
+  readonly id: TenantId;
+  readonly name: string;
+  readonly active: boolean;
+}
+
+/** Unidade fisica de um tenant (uma rede pode ter varias). */
+export interface ClinicUnit {
+  readonly id: ClinicUnitId;
+  readonly tenantId: TenantId;
+  readonly name: string;
+  readonly active: boolean;
+}
+
 export type UserStatus = "pending" | "active" | "disabled";
 
 export interface User {

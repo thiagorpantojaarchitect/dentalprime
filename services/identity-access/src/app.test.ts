@@ -5,6 +5,7 @@ import { buildApp } from "./app.js";
 import { AuthService } from "./application/auth-service.js";
 import { AuditService } from "./application/audit-service.js";
 import { AuthorizationService } from "./application/authorization-service.js";
+import { NetworkService } from "./application/network-service.js";
 import { JoseTokenService } from "./application/tokens.js";
 import { UserService } from "./application/user-service.js";
 import type { PasswordHasher } from "./application/password.js";
@@ -12,6 +13,8 @@ import {
   InMemoryAuditRepository,
   InMemoryRoleRepository,
   InMemorySessionRepository,
+  InMemoryTenantRepository,
+  InMemoryUnitRepository,
   InMemoryUserRepository,
 } from "./infrastructure/memory-repositories.js";
 
@@ -61,10 +64,19 @@ async function buildTestApp(): Promise<{ app: FastifyInstance; ownerId: string }
     audit,
     authorization,
   });
+  const network = new NetworkService({
+    tenants: new InMemoryTenantRepository(),
+    units: new InMemoryUnitRepository(),
+    users,
+    roles,
+    audit,
+    authorization,
+  });
 
   const app = await buildApp({
     auth,
     users: userService,
+    network,
     tokens,
     loginRateLimitPerMinute: 100,
   });
@@ -138,5 +150,50 @@ describe("identity-access API", () => {
       payload: { tenantId: "nao-uuid", email: "x", password: "" },
     });
     expect(res.statusCode).toBe(400);
+  });
+
+  it("rede: owner cria e lista unidades e lista usuarios", async () => {
+    const login = await app.inject({
+      method: "POST",
+      url: "/auth/login",
+      payload: { tenantId: TENANT, email: "owner@clinica.com", password: "senha-owner" },
+    });
+    const token = login.json().accessToken as string;
+    const auth = { authorization: `Bearer ${token}` };
+
+    // Sem token: 401.
+    const noAuth = await app.inject({ method: "GET", url: "/units" });
+    expect(noAuth.statusCode).toBe(401);
+
+    // Cria unidade.
+    const created = await app.inject({
+      method: "POST",
+      url: "/units",
+      headers: auth,
+      payload: { name: "Unidade Centro" },
+    });
+    expect(created.statusCode).toBe(201);
+    const unitId = created.json().id as string;
+
+    // Lista unidades.
+    const units = await app.inject({ method: "GET", url: "/units", headers: auth });
+    expect(units.statusCode).toBe(200);
+    expect(units.json().units).toHaveLength(1);
+
+    // Desativa unidade.
+    const deactivated = await app.inject({
+      method: "POST",
+      url: `/units/${unitId}/deactivate`,
+      headers: auth,
+    });
+    expect(deactivated.statusCode).toBe(204);
+
+    // Lista usuarios (o proprio owner) com papeis.
+    const usersRes = await app.inject({ method: "GET", url: "/users", headers: auth });
+    expect(usersRes.statusCode).toBe(200);
+    const list = usersRes.json().users as Array<{ email: string; roles: string[] }>;
+    expect(
+      list.some((u) => u.email === "owner@clinica.com" && u.roles.includes("owner")),
+    ).toBe(true);
   });
 });

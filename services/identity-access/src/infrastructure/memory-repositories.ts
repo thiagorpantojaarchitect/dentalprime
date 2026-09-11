@@ -11,8 +11,10 @@ import { randomUUID } from "node:crypto";
 
 import type {
   AuditEntry,
+  ClinicUnit,
   RoleAssignment,
   Session,
+  Tenant,
   User,
   UserStatus,
 } from "../domain/models.js";
@@ -21,6 +23,8 @@ import type {
   CreateUserInput,
   RoleRepository,
   SessionRepository,
+  TenantRepository,
+  UnitRepository,
   UserRepository,
 } from "../domain/repositories.js";
 
@@ -70,6 +74,70 @@ export class InMemoryUserRepository implements UserRepository {
     const user = await this.findById(tenantId, userId);
     if (user) this.rows.set(userId, { ...user, passwordHash });
   }
+
+  async listByTenant(tenantId: TenantId): Promise<User[]> {
+    return [...this.rows.values()]
+      .filter((u) => u.tenantId === tenantId)
+      .sort((a, b) => a.email.localeCompare(b.email));
+  }
+}
+
+export class InMemoryTenantRepository implements TenantRepository {
+  private readonly rows = new Map<string, Tenant>();
+
+  async create(input: { name: string }): Promise<Tenant> {
+    const tenant: Tenant = { id: randomUUID(), name: input.name, active: true };
+    this.rows.set(tenant.id, tenant);
+    return tenant;
+  }
+
+  async findById(tenantId: TenantId): Promise<Tenant | null> {
+    return this.rows.get(tenantId) ?? null;
+  }
+
+  async list(): Promise<Tenant[]> {
+    return [...this.rows.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  async setActive(tenantId: TenantId, active: boolean): Promise<void> {
+    const tenant = this.rows.get(tenantId);
+    if (tenant) this.rows.set(tenantId, { ...tenant, active });
+  }
+}
+
+export class InMemoryUnitRepository implements UnitRepository {
+  private readonly rows = new Map<string, ClinicUnit>();
+
+  async create(input: { tenantId: TenantId; name: string }): Promise<ClinicUnit> {
+    const unit: ClinicUnit = {
+      id: randomUUID(),
+      tenantId: input.tenantId,
+      name: input.name,
+      active: true,
+    };
+    this.rows.set(unit.id, unit);
+    return unit;
+  }
+
+  async findById(tenantId: TenantId, unitId: ClinicUnitId): Promise<ClinicUnit | null> {
+    const unit = this.rows.get(unitId);
+    return unit && unit.tenantId === tenantId ? unit : null;
+  }
+
+  async listByTenant(tenantId: TenantId): Promise<ClinicUnit[]> {
+    return [...this.rows.values()]
+      .filter((u) => u.tenantId === tenantId)
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  async setActive(
+    tenantId: TenantId,
+    unitId: ClinicUnitId,
+    active: boolean,
+  ): Promise<void> {
+    const unit = await this.findById(tenantId, unitId);
+    if (unit) this.rows.set(unitId, { ...unit, active });
+  }
 }
 
 export class InMemoryRoleRepository implements RoleRepository {
@@ -77,6 +145,10 @@ export class InMemoryRoleRepository implements RoleRepository {
 
   async listForUser(tenantId: TenantId, userId: UserId): Promise<RoleAssignment[]> {
     return this.rows.filter((r) => r.tenantId === tenantId && r.userId === userId);
+  }
+
+  async listForTenant(tenantId: TenantId): Promise<RoleAssignment[]> {
+    return this.rows.filter((r) => r.tenantId === tenantId);
   }
 
   async assign(

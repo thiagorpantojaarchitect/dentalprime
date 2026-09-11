@@ -6,12 +6,14 @@
  */
 
 import type { ClinicUnitId, Role, TenantId, UserId } from "@dentalprime/core";
-import { and, eq, isNull, gt } from "drizzle-orm";
+import { and, asc, eq, isNull, gt } from "drizzle-orm";
 
 import type {
   AuditEntry,
+  ClinicUnit,
   RoleAssignment,
   Session,
+  Tenant,
   User,
   UserStatus,
 } from "../domain/models.js";
@@ -20,10 +22,19 @@ import type {
   CreateUserInput,
   RoleRepository,
   SessionRepository,
+  TenantRepository,
+  UnitRepository,
   UserRepository,
 } from "../domain/repositories.js";
 import type { Database } from "./db/client.js";
-import { auditLogs, roleAssignments, sessions, users } from "./db/schema.js";
+import {
+  auditLogs,
+  clinicUnits,
+  roleAssignments,
+  sessions,
+  tenants,
+  users,
+} from "./db/schema.js";
 
 function toUser(row: typeof users.$inferSelect): User {
   return {
@@ -92,6 +103,96 @@ export class DrizzleUserRepository implements UserRepository {
       .set({ passwordHash, updatedAt: new Date() })
       .where(and(eq(users.tenantId, tenantId), eq(users.id, userId)));
   }
+
+  async listByTenant(tenantId: TenantId): Promise<User[]> {
+    const rows = await this.db
+      .select()
+      .from(users)
+      .where(eq(users.tenantId, tenantId))
+      .orderBy(asc(users.email));
+    return rows.map(toUser);
+  }
+}
+
+function toTenant(row: typeof tenants.$inferSelect): Tenant {
+  return { id: row.id, name: row.name, active: row.active };
+}
+
+export class DrizzleTenantRepository implements TenantRepository {
+  constructor(private readonly db: Database) {}
+
+  async create(input: { name: string }): Promise<Tenant> {
+    const rows = await this.db.insert(tenants).values({ name: input.name }).returning();
+    return toTenant(rows[0]!);
+  }
+
+  async findById(tenantId: TenantId): Promise<Tenant | null> {
+    const rows = await this.db
+      .select()
+      .from(tenants)
+      .where(eq(tenants.id, tenantId))
+      .limit(1);
+    const row = rows[0];
+    return row ? toTenant(row) : null;
+  }
+
+  async list(): Promise<Tenant[]> {
+    const rows = await this.db.select().from(tenants).orderBy(asc(tenants.name));
+    return rows.map(toTenant);
+  }
+
+  async setActive(tenantId: TenantId, active: boolean): Promise<void> {
+    await this.db
+      .update(tenants)
+      .set({ active, updatedAt: new Date() })
+      .where(eq(tenants.id, tenantId));
+  }
+}
+
+function toUnit(row: typeof clinicUnits.$inferSelect): ClinicUnit {
+  return { id: row.id, tenantId: row.tenantId, name: row.name, active: row.active };
+}
+
+export class DrizzleUnitRepository implements UnitRepository {
+  constructor(private readonly db: Database) {}
+
+  async create(input: { tenantId: TenantId; name: string }): Promise<ClinicUnit> {
+    const rows = await this.db
+      .insert(clinicUnits)
+      .values({ tenantId: input.tenantId, name: input.name })
+      .returning();
+    return toUnit(rows[0]!);
+  }
+
+  async findById(tenantId: TenantId, unitId: ClinicUnitId): Promise<ClinicUnit | null> {
+    const rows = await this.db
+      .select()
+      .from(clinicUnits)
+      .where(and(eq(clinicUnits.tenantId, tenantId), eq(clinicUnits.id, unitId)))
+      .limit(1);
+    const row = rows[0];
+    return row ? toUnit(row) : null;
+  }
+
+  async listByTenant(tenantId: TenantId): Promise<ClinicUnit[]> {
+    const rows = await this.db
+      .select()
+      .from(clinicUnits)
+      .where(eq(clinicUnits.tenantId, tenantId))
+      .orderBy(asc(clinicUnits.name));
+    return rows.map(toUnit);
+  }
+
+  async setActive(
+    tenantId: TenantId,
+    unitId: ClinicUnitId,
+    active: boolean,
+  ): Promise<void> {
+    await this.db
+      .update(clinicUnits)
+      .set({ active, updatedAt: new Date() })
+      .where(and(eq(clinicUnits.tenantId, tenantId), eq(clinicUnits.id, unitId)));
+  }
 }
 
 export class DrizzleRoleRepository implements RoleRepository {
@@ -104,6 +205,20 @@ export class DrizzleRoleRepository implements RoleRepository {
       .where(
         and(eq(roleAssignments.tenantId, tenantId), eq(roleAssignments.userId, userId)),
       );
+    return rows.map((row) => ({
+      id: row.id,
+      tenantId: row.tenantId,
+      userId: row.userId,
+      role: row.role,
+      unitId: row.unitId,
+    }));
+  }
+
+  async listForTenant(tenantId: TenantId): Promise<RoleAssignment[]> {
+    const rows = await this.db
+      .select()
+      .from(roleAssignments)
+      .where(eq(roleAssignments.tenantId, tenantId));
     return rows.map((row) => ({
       id: row.id,
       tenantId: row.tenantId,

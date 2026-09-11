@@ -10,7 +10,15 @@
 
 import type { ClinicUnitId, Role, TenantId, UserId } from "@dentalprime/core";
 
-import type { AuditEntry, RoleAssignment, Session, User, UserStatus } from "./models.js";
+import type {
+  AuditEntry,
+  ClinicUnit,
+  RoleAssignment,
+  Session,
+  Tenant,
+  User,
+  UserStatus,
+} from "./models.js";
 
 export interface CreateUserInput {
   readonly tenantId: TenantId;
@@ -30,10 +38,29 @@ export interface UserRepository {
     userId: UserId,
     passwordHash: string,
   ): Promise<void>;
+  /** Lista os usuarios do tenant (ordem estavel por email). */
+  listByTenant(tenantId: TenantId): Promise<User[]>;
+}
+
+export interface TenantRepository {
+  create(input: { name: string }): Promise<Tenant>;
+  findById(tenantId: TenantId): Promise<Tenant | null>;
+  /** Lista todos os tenants (operacao administrativa de plataforma). */
+  list(): Promise<Tenant[]>;
+  setActive(tenantId: TenantId, active: boolean): Promise<void>;
+}
+
+export interface UnitRepository {
+  create(input: { tenantId: TenantId; name: string }): Promise<ClinicUnit>;
+  findById(tenantId: TenantId, unitId: ClinicUnitId): Promise<ClinicUnit | null>;
+  listByTenant(tenantId: TenantId): Promise<ClinicUnit[]>;
+  setActive(tenantId: TenantId, unitId: ClinicUnitId, active: boolean): Promise<void>;
 }
 
 export interface RoleRepository {
   listForUser(tenantId: TenantId, userId: UserId): Promise<RoleAssignment[]>;
+  /** Lista todas as atribuicoes do tenant (para compor a lista de usuarios). */
+  listForTenant(tenantId: TenantId): Promise<RoleAssignment[]>;
   assign(
     tenantId: TenantId,
     userId: UserId,

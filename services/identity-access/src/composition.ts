@@ -8,6 +8,7 @@
 import { AuthService } from "./application/auth-service.js";
 import { AuthorizationService } from "./application/authorization-service.js";
 import { AuditService } from "./application/audit-service.js";
+import { NetworkService } from "./application/network-service.js";
 import { argon2Hasher } from "./application/password.js";
 import { JoseTokenService } from "./application/tokens.js";
 import { UserService } from "./application/user-service.js";
@@ -17,6 +18,8 @@ import {
   DrizzleAuditRepository,
   DrizzleRoleRepository,
   DrizzleSessionRepository,
+  DrizzleTenantRepository,
+  DrizzleUnitRepository,
   DrizzleUserRepository,
 } from "./infrastructure/repositories.js";
 import type { AppDeps } from "./app.js";
@@ -33,6 +36,8 @@ export function composeProduction(config: Config): Composition {
   const roleRepo = new DrizzleRoleRepository(db);
   const sessionRepo = new DrizzleSessionRepository(db);
   const auditRepo = new DrizzleAuditRepository(db);
+  const tenantRepo = new DrizzleTenantRepository(db);
+  const unitRepo = new DrizzleUnitRepository(db);
 
   const tokens = new JoseTokenService(config.jwtSecret, config.accessTokenTtlSeconds);
   const audit = new AuditService(auditRepo);
@@ -57,10 +62,20 @@ export function composeProduction(config: Config): Composition {
     authorization,
   });
 
+  const network = new NetworkService({
+    tenants: tenantRepo,
+    units: unitRepo,
+    users: userRepo,
+    roles: roleRepo,
+    audit,
+    authorization,
+  });
+
   return {
     connection,
     auth,
     users,
+    network,
     tokens,
     loginRateLimitPerMinute: config.loginRateLimitPerMinute,
   };
