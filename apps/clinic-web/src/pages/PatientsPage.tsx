@@ -1,31 +1,31 @@
 /**
- * Pagina de pacientes: cadastro de novo paciente e consulta por id.
- *
- * Consome patient-record. O backend valida CPF e isolamento por tenant; aqui
- * apenas coletamos os dados e exibimos o resultado/erro de forma amigavel.
+ * Pagina de pacientes: cadastro de novo paciente e busca por id para abrir o
+ * prontuario. Consome patient-record. O backend valida CPF e isolamento por
+ * tenant; aqui coletamos os dados e exibimos resultado/erro de forma amigavel.
  */
 
-import { useState, type FormEvent } from "react";
+import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 import { ApiError } from "../api/client.js";
-import type { Patient } from "../api/types.js";
 import { useServices } from "../api/use-services.js";
+import { CardForm, ErrorBanner, Field, PageHeader } from "../ui/components.js";
 
 export function PatientsPage(): JSX.Element {
   const { patients } = useServices();
+  const navigate = useNavigate();
 
   const [fullName, setFullName] = useState("");
   const [cpf, setCpf] = useState("");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
-  const [created, setCreated] = useState<Patient | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  const onSubmit = async (event: FormEvent): Promise<void> => {
-    event.preventDefault();
+  const [lookupId, setLookupId] = useState("");
+
+  const register = async (): Promise<void> => {
     setError(null);
-    setCreated(null);
     setSubmitting(true);
     try {
       const { id } = await patients.register({
@@ -34,12 +34,7 @@ export function PatientsPage(): JSX.Element {
         email: email || null,
         phone: phone || null,
       });
-      const patient = await patients.getById(id);
-      setCreated(patient);
-      setFullName("");
-      setCpf("");
-      setEmail("");
-      setPhone("");
+      navigate(`/pacientes/${id}`);
     } catch (err) {
       if (err instanceof ApiError && err.code === "VALIDATION") {
         setError("Dados inválidos. Verifique o CPF e o nome.");
@@ -53,55 +48,59 @@ export function PatientsPage(): JSX.Element {
     }
   };
 
+  const openLookup = (): void => {
+    const id = lookupId.trim();
+    if (id) navigate(`/pacientes/${id}`);
+  };
+
   return (
     <section>
-      <h2>Pacientes</h2>
-      <form
-        className="card"
-        onSubmit={(e) => void onSubmit(e)}
-        aria-label="Cadastrar paciente"
-      >
-        <h3>Novo paciente</h3>
-        <div className="field">
-          <label htmlFor="fullName">Nome completo</label>
-          <input
+      <PageHeader
+        title="Pacientes"
+        subtitle="Cadastre pacientes e acesse o prontuário clínico."
+      />
+
+      <div className="grid-2">
+        <CardForm title="Novo paciente" label="Cadastrar paciente" onSubmit={register}>
+          <Field
             id="fullName"
+            label="Nome completo"
             value={fullName}
-            onChange={(e) => setFullName(e.target.value)}
+            onChange={setFullName}
             required
           />
-        </div>
-        <div className="field">
-          <label htmlFor="cpf">CPF</label>
-          <input id="cpf" value={cpf} onChange={(e) => setCpf(e.target.value)} required />
-        </div>
-        <div className="field">
-          <label htmlFor="email">E-mail</label>
-          <input
+          <Field id="cpf" label="CPF" value={cpf} onChange={setCpf} required />
+          <Field
             id="email"
+            label="E-mail"
             type="email"
             value={email}
-            onChange={(e) => setEmail(e.target.value)}
+            onChange={setEmail}
           />
-        </div>
-        <div className="field">
-          <label htmlFor="phone">Telefone</label>
-          <input id="phone" value={phone} onChange={(e) => setPhone(e.target.value)} />
-        </div>
-        {error && <p className="error">{error}</p>}
-        <button type="submit" disabled={submitting}>
-          {submitting ? "Salvando..." : "Cadastrar"}
-        </button>
-      </form>
+          <Field id="phone" label="Telefone" value={phone} onChange={setPhone} />
+          <ErrorBanner message={error} />
+          <button type="submit" disabled={submitting}>
+            {submitting ? "Salvando..." : "Cadastrar"}
+          </button>
+        </CardForm>
 
-      {created && (
-        <div className="card" style={{ marginTop: 24 }} aria-label="Paciente cadastrado">
-          <h3>Paciente cadastrado</h3>
-          <p>
-            <strong>{created.fullName}</strong> — CPF {created.cpf}
-          </p>
-        </div>
-      )}
+        <CardForm
+          title="Abrir prontuário"
+          label="Buscar paciente"
+          onSubmit={() => openLookup()}
+        >
+          <Field
+            id="lookupId"
+            label="ID do paciente"
+            value={lookupId}
+            onChange={setLookupId}
+            required
+          />
+          <button type="submit" className="secondary">
+            Abrir
+          </button>
+        </CardForm>
+      </div>
     </section>
   );
 }
