@@ -12,8 +12,12 @@ const configSchema = z.object({
   port: z.coerce.number().int().positive().default(3007),
   databaseUrl: z.string().min(1, "DATABASE_URL e obrigatoria"),
   jwtSecret: z.string().min(32, "JWT_SECRET deve ter ao menos 32 caracteres"),
-  // Provedor de IA em uso: "stub" (dev/teste). Adaptadores reais entram depois.
-  aiProvider: z.enum(["stub"]).default("stub"),
+  // Provedor de IA em uso: "stub" (dev/teste) ou "bedrock" (Amazon Bedrock).
+  aiProvider: z.enum(["stub", "bedrock"]).default("stub"),
+  // Regiao do Bedrock. Padrao sa-east-1 (dados no Brasil).
+  bedrockRegion: z.string().min(1).default("sa-east-1"),
+  // Id do modelo/inference profile do Bedrock. Obrigatorio quando aiProvider=bedrock.
+  bedrockModelId: z.string().min(1).optional(),
 });
 
 export type Config = z.infer<typeof configSchema>;
@@ -25,6 +29,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     databaseUrl: env.DATABASE_URL,
     jwtSecret: env.JWT_SECRET,
     aiProvider: env.AI_PROVIDER,
+    bedrockRegion: env.BEDROCK_REGION,
+    bedrockModelId: env.BEDROCK_MODEL_ID,
   });
 
   if (!parsed.success) {

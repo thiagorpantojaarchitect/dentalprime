@@ -18,6 +18,7 @@
     "dev": "node --watch --experimental-strip-types src/main.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "3.1131.0",
     "@dentalprime/core": "*",
     "@dentalprime/observability": "*",
     "drizzle-orm": "0.38.3",

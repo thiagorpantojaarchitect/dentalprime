@@ -13,14 +13,17 @@ async function main(): Promise<void> {
     environment: process.env.NODE_ENV,
   });
 
-  const [{ buildApp }, { composeProduction }, { loadConfig }] = await Promise.all([
-    import("./app.js"),
-    import("./composition.js"),
-    import("./config.js"),
-  ]);
+  const [{ buildApp }, { composeProduction }, { loadConfig }, { createAIProvider }] =
+    await Promise.all([
+      import("./app.js"),
+      import("./composition.js"),
+      import("./config.js"),
+      import("./application/ai-provider-factory.js"),
+    ]);
 
   const config = loadConfig();
-  const composition = composeProduction(config);
+  const aiProvider = createAIProvider(config);
+  const composition = composeProduction(config, aiProvider);
   const app = await buildApp(composition);
 
   const shutdown = async (): Promise<void> => {
