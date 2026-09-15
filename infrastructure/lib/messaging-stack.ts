@@ -8,6 +8,7 @@
 
 import { Duration, Stack, type StackProps } from "aws-cdk-lib";
 import * as events from "aws-cdk-lib/aws-events";
+import * as targets from "aws-cdk-lib/aws-events-targets";
 import * as kms from "aws-cdk-lib/aws-kms";
 import * as sqs from "aws-cdk-lib/aws-sqs";
 import type { Construct } from "constructs";
@@ -26,6 +27,8 @@ export class MessagingStack extends Stack {
   public readonly eventBus: events.EventBus;
   /** Fila de notificacoes (ex.: lembretes, confirmacoes). */
   public readonly notificationsQueue: sqs.Queue;
+  /** DLQ exposta para alarmes operacionais. */
+  public readonly notificationsDlq: sqs.Queue;
 
   constructor(scope: Construct, id: string, props: MessagingStackProps) {
     super(scope, id, props);
@@ -40,7 +43,7 @@ export class MessagingStack extends Stack {
     });
 
     // Dead-letter queue para mensagens que falham repetidamente.
-    const notificationsDlq = new sqs.Queue(this, "NotificationsDlq", {
+    this.notificationsDlq = new sqs.Queue(this, "NotificationsDlq", {
       queueName: `${RESOURCE_PREFIX}-notifications-dlq-${suffix}`,
       encryption: sqs.QueueEncryption.KMS,
       encryptionMasterKey: dataKey,
@@ -55,9 +58,27 @@ export class MessagingStack extends Stack {
       visibilityTimeout: Duration.seconds(60),
       enforceSSL: true,
       deadLetterQueue: {
-        queue: notificationsDlq,
+        queue: this.notificationsDlq,
         maxReceiveCount: 5,
       },
+    });
+
+    // Eventos que geram comunicacao operacional seguem para uma fila duravel.
+    // O consumidor pode ser ativado sem alterar os publicadores de dominio.
+    new events.Rule(this, "NotificationsRule", {
+      ruleName: `${RESOURCE_PREFIX}-notifications-${suffix}`,
+      eventBus: this.eventBus,
+      eventPattern: {
+        source: ["dentalprime.smart-scheduling"],
+        detailType: ["ReminderScheduled.v1"],
+      },
+      targets: [
+        new targets.SqsQueue(this.notificationsQueue, {
+          deadLetterQueue: this.notificationsDlq,
+          maxEventAge: Duration.hours(2),
+          retryAttempts: 6,
+        }),
+      ],
     });
   }
 }

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import { ForbiddenError } from "../domain/errors.js";
-import { buildEnv, makeContext, seedProvider, UNIT_A } from "./test-helpers.js";
+import { buildEnv, makeContext, seedProvider, UNIT_A, UNIT_B } from "./test-helpers.js";
 
 const actor = makeContext();
 const patientA = "aaaa1111-1111-1111-1111-111111111111";
@@ -56,5 +56,30 @@ describe("WaitlistService", () => {
         providerId,
       }),
     ).rejects.toBeInstanceOf(ForbiddenError);
+  });
+
+  it("protege inclusao, sugestoes e fulfillment entre unidades A/B", async () => {
+    const env = buildEnv();
+    const providerId = await seedProvider(env);
+    const entry = await env.waitlist.add(makeContext({ units: [UNIT_A] }), {
+      patientId: patientA,
+      unitId: UNIT_A,
+      providerId,
+    });
+    const actorB = makeContext({ units: [UNIT_B] });
+
+    await expect(
+      env.waitlist.add(actorB, {
+        patientId: patientB,
+        unitId: UNIT_A,
+        providerId,
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+    await expect(
+      env.waitlist.suggestForProvider(actorB, providerId),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+    await expect(env.waitlist.markFulfilled(actorB, entry.id)).rejects.toBeInstanceOf(
+      ForbiddenError,
+    );
   });
 });

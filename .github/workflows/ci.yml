@@ -1,7 +1,7 @@
 # CI: verificacao do monorepo (build, lint, format, testes).
 #
 # Roda em pull requests e em push para main. Nao acessa a AWS nem publica
-# artefatos: apenas valida o codigo (backend, clinic-web e infraestrutura).
+# artefatos: apenas valida o codigo, os dois frontends e a infraestrutura.
 
 name: ci
 
@@ -25,10 +25,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Configurar Node 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           cache: npm
@@ -42,6 +42,12 @@ jobs:
       - name: Build do frontend (clinic-web)
         run: npm run build --workspace @dentalprime/clinic-web
 
+      - name: Build do frontend (admin-portal)
+        run: npm run build --workspace @dentalprime/admin-portal
+
+      - name: Typecheck dos aplicativos mobile
+        run: npm run typecheck:mobile
+
       - name: Lint
         run: npm run lint
 
@@ -54,39 +60,452 @@ jobs:
       - name: Testes do frontend (clinic-web)
         run: npm test --workspace @dentalprime/clinic-web
 
-  docker-build:
-    name: build das imagens de container (sem publicar)
+      - name: Testes do frontend (admin-portal)
+        run: npm test --workspace @dentalprime/admin-portal
+
+      # Conta sintetica + AZs versionadas em infrastructure/cdk.context.json:
+      # nao acessa AWS, mas valida CloudFormation e cdk-nag em modo estrito.
+      - name: CDK synth estrito (development, zero replicas)
+        run: >-
+          npm run synth --workspace @dentalprime/infrastructure --
+          --strict
+          -c env=development
+          -c account=111111111111
+          -c desiredCount=0
+
+  integration:
+    name: migrations sequenciais e smoke dos containers
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        service:
-          - { name: identity-access, port: 3001 }
-          - { name: patient-record, port: 3002 }
-          - { name: smart-scheduling, port: 3003 }
-          - { name: treatment-plan, port: 3004 }
-          - { name: finance, port: 3005 }
-          - { name: crm-growth, port: 3006 }
-          - { name: ai-front-desk, port: 3007 }
+    timeout-minutes: 45
+    env:
+      COMPOSE_PROJECT_NAME: dentalprime-ci-${{ github.run_id }}
+      POSTGRES_DB: dentalprime
+      POSTGRES_USER: dentalprime
+      POSTGRES_PASSWORD: ci-only-postgres-password
+      JWT_SECRET: ci-only-jwt-secret-00000000000000000000000000000000
+      BOOTSTRAP_TENANT_NAME: Clinica CI Sintetica
+      BOOTSTRAP_ADMIN_EMAIL: admin-ci@example.invalid
+      BOOTSTRAP_ADMIN_NAME: Administrador CI
+      BOOTSTRAP_ADMIN_PASSWORD: ci-only-bootstrap-password
+      MINIO_ROOT_USER: dentalprime-ci
+      MINIO_ROOT_PASSWORD: ci-only-minio-password
+      AI_PROVIDER: stub
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Configurar Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Build das sete imagens
+        run: >-
+          docker compose build
+          identity-access patient-record smart-scheduling
+          treatment-plan finance crm-growth ai-front-desk
 
-      # Valida que a imagem de cada servico builda. Nao faz push (sem registry).
-      - name: Build da imagem ${{ matrix.service.name }}
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          push: false
-          load: false
-          build-args: |
-            SERVICE=${{ matrix.service.name }}
-            PORT=${{ matrix.service.port }}
-          tags: dentalprime/${{ matrix.service.name }}:ci
-          cache-from: type=gha,scope=${{ matrix.service.name }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service.name }}
+      - name: Subir PostgreSQL com TLS e MinIO
+        run: docker compose up -d --wait postgres minio
+
+      - name: Preparar bucket clinico local
+        run: docker compose run --rm --no-deps minio-init
+
+      # A ordem reproduz o gate AWS: nenhum servico sobe antes de todas as
+      # migrations da revisao candidata terminarem.
+      - name: Executar migrations sequencialmente
+        shell: bash
+        run: |
+          set -euo pipefail
+          for migration in migrate-identity migrate-patient migrate-scheduling migrate-treatment migrate-finance migrate-crm migrate-ai; do
+            docker compose run --rm --no-deps "$migration"
+          done
+
+      - name: Bootstrap fechado do primeiro tenant
+        id: bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUTPUT=$(docker compose --profile bootstrap run --rm --no-deps bootstrap 2>&1)
+          TENANT_ID=$(sed -nE \
+            's/.*Tenant ID: ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\..*/\1/p' \
+            <<<"$OUTPUT" | tail -n 1)
+          if [[ ! "$TENANT_ID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            echo "Bootstrap nao retornou um tenant ID valido." >&2
+            exit 1
+          fi
+          echo "tenant_id=$TENANT_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Subir containers sem repetir migrations
+        run: >-
+          docker compose up -d --no-deps --wait
+          identity-access patient-record smart-scheduling
+          treatment-plan finance crm-growth ai-front-desk
+
+      - name: Smoke de upload e download pre-assinados
+        run: docker compose --profile smoke run --rm --no-deps smoke-storage
+
+      - name: Smoke de CORS restrito do storage local
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error -D - -o /dev/null -X OPTIONS \
+            -H 'Origin: http://localhost:5173' \
+            -H 'Access-Control-Request-Method: PUT' \
+            http://localhost:9000/dentalprime-clinical-documents-development/synthetic-cors-check \
+            | tr -d '\r' \
+            | grep -iE '^access-control-allow-origin: http://localhost:5173$'
+
+      - name: Smoke HTTP com readiness de banco
+        run: docker compose --profile smoke run --rm --no-deps smoke
+
+      - name: Smoke de identidade, prontuario e agenda contra PostgreSQL
+        shell: bash
+        env:
+          SMOKE_TENANT_ID: ${{ steps.bootstrap.outputs.tenant_id }}
+        run: |
+          set -euo pipefail
+          docker compose exec -T \
+            -e SMOKE_TENANT_ID="$SMOKE_TENANT_ID" \
+            -e SMOKE_ADMIN_EMAIL="$BOOTSTRAP_ADMIN_EMAIL" \
+            -e SMOKE_ADMIN_PASSWORD="$BOOTSTRAP_ADMIN_PASSWORD" \
+            identity-access node --input-type=module <<'NODE'
+          const identityBase = "http://127.0.0.1:3001";
+          const patientBase = "http://patient-record:3002";
+          const schedulingBase = "http://smart-scheduling:3003";
+          const tenantId = process.env.SMOKE_TENANT_ID;
+          const adminEmail = process.env.SMOKE_ADMIN_EMAIL;
+          const adminPassword = process.env.SMOKE_ADMIN_PASSWORD;
+          const patientEmail = "paciente-ci@example.invalid";
+          const patientPassword = "ci-only-patient-password";
+
+          async function jsonRequest(base, path, init, expected) {
+            const response = await fetch(base + path, {
+              ...init,
+              headers: {
+                "content-type": "application/json",
+                ...(init?.headers ?? {}),
+              },
+            });
+            if (!expected.includes(response.status)) {
+              throw new Error(`${path} retornou HTTP ${response.status}`);
+            }
+            return response.status === 204 ? null : response.json();
+          }
+
+          async function responseStatus(base, path, init, expected) {
+            const response = await fetch(base + path, {
+              ...init,
+              headers: {
+                "content-type": "application/json",
+                ...(init?.headers ?? {}),
+              },
+            });
+            if (!expected.includes(response.status)) {
+              throw new Error(`${path} retornou HTTP ${response.status}`);
+            }
+            await response.arrayBuffer();
+            return response.status;
+          }
+
+          const admin = await jsonRequest(identityBase, "/auth/login", {
+            method: "POST",
+            body: JSON.stringify({ tenantId, email: adminEmail, password: adminPassword }),
+          }, [200]);
+          const adminHeaders = { authorization: `Bearer ${admin.accessToken}` };
+
+          await jsonRequest(identityBase, "/tenants?page=1&pageSize=1", {
+            headers: adminHeaders,
+          }, [200]);
+
+          const invitation = await jsonRequest(identityBase, "/users/invite", {
+            method: "POST",
+            headers: adminHeaders,
+            body: JSON.stringify({
+              email: patientEmail,
+              displayName: "Paciente CI",
+              role: "patient",
+            }),
+          }, [201]);
+
+          const activationBody = JSON.stringify({
+            tenantId,
+            activationToken: invitation.activationToken,
+            password: patientPassword,
+          });
+          await jsonRequest(identityBase, "/users/activate", {
+            method: "POST",
+            body: activationBody,
+          }, [204]);
+          await jsonRequest(identityBase, "/users/activate", {
+            method: "POST",
+            body: activationBody,
+          }, [404]);
+
+          const patientLogin = await jsonRequest(identityBase, "/auth/login", {
+            method: "POST",
+            body: JSON.stringify({ tenantId, email: patientEmail, password: patientPassword }),
+          }, [200]);
+
+          const createdPatient = await jsonRequest(patientBase, "/patients", {
+            method: "POST",
+            headers: adminHeaders,
+            // CPF matematicamente valido, reservado exclusivamente ao banco efemero da CI.
+            body: JSON.stringify({ fullName: "Paciente CI", cpf: "52998224725" }),
+          }, [201]);
+          await jsonRequest(
+            patientBase,
+            `/patients/${createdPatient.id}/portal-user`,
+            {
+              method: "PUT",
+              headers: adminHeaders,
+              body: JSON.stringify({ portalUserId: invitation.id }),
+            },
+            [200],
+          );
+          const ownRecord = await jsonRequest(patientBase, "/patients/me", {
+            headers: { authorization: `Bearer ${patientLogin.accessToken}` },
+          }, [200]);
+          if (ownRecord.id !== createdPatient.id) {
+            throw new Error("O prontuario retornado nao pertence ao usuario vinculado.");
+          }
+
+          const rotated = await jsonRequest(identityBase, "/auth/refresh", {
+            method: "POST",
+            body: JSON.stringify({ tenantId, refreshToken: patientLogin.refreshToken }),
+          }, [200]);
+          if (!rotated.accessToken || !rotated.refreshToken) {
+            throw new Error("A rotacao de sessao nao retornou o novo par de tokens.");
+          }
+          await jsonRequest(identityBase, "/auth/refresh", {
+            method: "POST",
+            body: JSON.stringify({ tenantId, refreshToken: patientLogin.refreshToken }),
+          }, [401]);
+
+          const unitA = await jsonRequest(identityBase, "/units", {
+            method: "POST",
+            headers: adminHeaders,
+            body: JSON.stringify({ name: "Unidade CI A" }),
+          }, [201]);
+          const unitB = await jsonRequest(identityBase, "/units", {
+            method: "POST",
+            headers: adminHeaders,
+            body: JSON.stringify({ name: "Unidade CI B" }),
+          }, [201]);
+
+          const dentist = await jsonRequest(identityBase, "/users/invite", {
+            method: "POST",
+            headers: adminHeaders,
+            body: JSON.stringify({
+              email: "dentista-ci@example.invalid",
+              displayName: "Dentista CI",
+              role: "dentist",
+              unitId: unitA.id,
+            }),
+          }, [201]);
+          await jsonRequest(identityBase, "/users/activate", {
+            method: "POST",
+            body: JSON.stringify({
+              tenantId,
+              activationToken: dentist.activationToken,
+              password: "ci-only-dentist-password",
+            }),
+          }, [204]);
+          const dentistLogin = await jsonRequest(identityBase, "/auth/login", {
+            method: "POST",
+            body: JSON.stringify({
+              tenantId,
+              email: "dentista-ci@example.invalid",
+              password: "ci-only-dentist-password",
+            }),
+          }, [200]);
+          const dentistHeaders = {
+            authorization: `Bearer ${dentistLogin.accessToken}`,
+          };
+
+          async function setupUnit(unit, userId, label) {
+            const provider = await jsonRequest(schedulingBase, "/providers", {
+              method: "POST",
+              headers: adminHeaders,
+              body: JSON.stringify({
+                unitId: unit.id,
+                userId,
+                displayName: `Dra. ${label}`,
+              }),
+            }, [201]);
+            const resource = await jsonRequest(schedulingBase, "/resources", {
+              method: "POST",
+              headers: adminHeaders,
+              body: JSON.stringify({
+                unitId: unit.id,
+                name: `Cadeira ${label}`,
+                kind: "chair",
+              }),
+            }, [201]);
+            await jsonRequest(schedulingBase, "/availability", {
+              method: "POST",
+              headers: adminHeaders,
+              body: JSON.stringify({
+                unitId: unit.id,
+                providerId: provider.id,
+                resourceId: resource.id,
+                kind: "available",
+                startsAt: "2030-01-15T08:00:00.000Z",
+                endsAt: "2030-01-15T12:00:00.000Z",
+              }),
+            }, [201]);
+            return { provider, resource };
+          }
+
+          const catalogA = await setupUnit(unitA, dentist.id, "CI A");
+          const catalogB = await setupUnit(
+            unitB,
+            "22222222-2222-4222-8222-222222222222",
+            "CI B",
+          );
+          await jsonRequest(schedulingBase, "/availability", {
+            method: "POST",
+            headers: adminHeaders,
+            body: JSON.stringify({
+              unitId: unitA.id,
+              providerId: catalogA.provider.id,
+              resourceId: catalogA.resource.id,
+              kind: "block",
+              startsAt: "2030-01-15T09:00:00.000Z",
+              endsAt: "2030-01-15T10:00:00.000Z",
+            }),
+          }, [201]);
+
+          const appointmentBody = (unit, catalog, startsAt, endsAt) =>
+            JSON.stringify({
+              unitId: unit.id,
+              patientId: createdPatient.id,
+              providerId: catalog.provider.id,
+              resourceId: catalog.resource.id,
+              startsAt,
+              endsAt,
+            });
+
+          const first = await jsonRequest(schedulingBase, "/appointments", {
+            method: "POST",
+            headers: adminHeaders,
+            body: appointmentBody(
+              unitA,
+              catalogA,
+              "2030-01-15T08:00:00.000Z",
+              "2030-01-15T08:30:00.000Z",
+            ),
+          }, [201]);
+          await jsonRequest(schedulingBase, "/appointments", {
+            method: "POST",
+            headers: adminHeaders,
+            body: appointmentBody(
+              unitA,
+              catalogA,
+              "2030-01-15T09:15:00.000Z",
+              "2030-01-15T09:45:00.000Z",
+            ),
+          }, [409]);
+          await jsonRequest(schedulingBase, "/appointments", {
+            method: "POST",
+            headers: adminHeaders,
+            body: appointmentBody(
+              unitA,
+              catalogA,
+              "2030-01-15T13:00:00.000Z",
+              "2030-01-15T13:30:00.000Z",
+            ),
+          }, [409]);
+
+          const concurrentBody = appointmentBody(
+            unitA,
+            catalogA,
+            "2030-01-15T10:00:00.000Z",
+            "2030-01-15T10:30:00.000Z",
+          );
+          const race = await Promise.all([
+            responseStatus(schedulingBase, "/appointments", {
+              method: "POST",
+              headers: adminHeaders,
+              body: concurrentBody,
+            }, [201, 409]),
+            responseStatus(schedulingBase, "/appointments", {
+              method: "POST",
+              headers: adminHeaders,
+              body: concurrentBody,
+            }, [201, 409]),
+          ]);
+          if (race.sort().join(",") !== "201,409") {
+            throw new Error("A agenda nao garantiu uma unica reserva concorrente.");
+          }
+
+          const appointmentB = await jsonRequest(schedulingBase, "/appointments", {
+            method: "POST",
+            headers: adminHeaders,
+            body: appointmentBody(
+              unitB,
+              catalogB,
+              "2030-01-15T08:00:00.000Z",
+              "2030-01-15T08:30:00.000Z",
+            ),
+          }, [201]);
+          await jsonRequest(
+            schedulingBase,
+            `/appointments/${first.id}/status`,
+            {
+              method: "POST",
+              headers: dentistHeaders,
+              body: JSON.stringify({ status: "confirmed" }),
+            },
+            [200],
+          );
+          const history = await jsonRequest(
+            schedulingBase,
+            `/appointments/${first.id}/status-history`,
+            { headers: dentistHeaders },
+            [200],
+          );
+          if (!Array.isArray(history.history) || history.history.length !== 2) {
+            throw new Error("O historico da agenda nao foi persistido atomicamente.");
+          }
+
+          const range =
+            "?from=2030-01-15T00%3A00%3A00.000Z&to=2030-01-16T00%3A00%3A00.000Z";
+          const scopedDashboard = await jsonRequest(
+            schedulingBase,
+            "/dashboard" + range,
+            { headers: dentistHeaders },
+            [200],
+          );
+          if (scopedDashboard.total !== 2) {
+            throw new Error("O dashboard nao respeitou as unidades do JWT.");
+          }
+          await jsonRequest(
+            schedulingBase,
+            "/dashboard" + range + `&unitId=${unitB.id}`,
+            { headers: dentistHeaders },
+            [403],
+          );
+          await jsonRequest(
+            schedulingBase,
+            `/appointments/${appointmentB.id}/status-history`,
+            { headers: dentistHeaders },
+            [403],
+          );
+          const ownerDashboard = await jsonRequest(
+            schedulingBase,
+            "/dashboard" + range,
+            { headers: adminHeaders },
+            [200],
+          );
+          if (ownerDashboard.total !== 3) {
+            throw new Error("O dashboard tenant-wide nao agregou as unidades.");
+          }
+
+          console.log(
+            "Bootstrap, ativacao, RBAC, prontuario, refresh e agenda concorrente passaram.",
+          );
+          NODE
+
+      - name: Diagnostico em caso de falha
+        if: failure()
+        run: docker compose ps && docker compose logs --no-color --tail=200
+
+      - name: Limpar ambiente integrado
+        if: always()
+        run: docker compose --profile smoke down --volumes --remove-orphans

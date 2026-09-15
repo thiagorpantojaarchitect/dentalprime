@@ -7,8 +7,12 @@ import type { PasswordHasher } from "./password.js";
 import { InvalidCredentialsError, UnauthenticatedError } from "../domain/errors.js";
 import {
   InMemoryAuditRepository,
+  InMemoryIdentityUnitOfWork,
+  InMemoryInvitationRepository,
   InMemoryRoleRepository,
   InMemorySessionRepository,
+  InMemoryTenantRepository,
+  InMemoryUnitRepository,
   InMemoryUserRepository,
 } from "../infrastructure/memory-repositories.js";
 
@@ -30,9 +34,21 @@ function buildAuth() {
   const users = new InMemoryUserRepository();
   const roles = new InMemoryRoleRepository();
   const sessions = new InMemorySessionRepository();
+  const invitations = new InMemoryInvitationRepository();
+  const tenants = new InMemoryTenantRepository();
+  const units = new InMemoryUnitRepository();
   const auditRepo = new InMemoryAuditRepository();
   const audit = new AuditService(auditRepo);
   const tokens = new JoseTokenService(JWT_SECRET, 900);
+  const unitOfWork = new InMemoryIdentityUnitOfWork({
+    users,
+    roles,
+    sessions,
+    invitations,
+    tenants,
+    units,
+    audit: auditRepo,
+  });
   const auth = new AuthService({
     users,
     roles,
@@ -41,6 +57,7 @@ function buildAuth() {
     tokens,
     audit,
     refreshTtlSeconds: 3600,
+    unitOfWork,
   });
   return { auth, users, roles, sessions, auditRepo, tokens };
 }
@@ -82,6 +99,17 @@ describe("AuthService.login", () => {
 
     const success = env.auditRepo.entries.find((e) => e.action === "auth.login.success");
     expect(success).toBeDefined();
+  });
+
+  it("normaliza capitalizacao e espacos do email no login", async () => {
+    await seedActiveUser(env.users, TENANT, "dra@clinica.com", "senha-forte");
+    await expect(
+      env.auth.login({
+        tenantId: TENANT,
+        email: "  DRA@CLINICA.COM ",
+        password: "senha-forte",
+      }),
+    ).resolves.toHaveProperty("accessToken");
   });
 
   it("nega senha incorreta e audita a falha", async () => {
@@ -140,5 +168,22 @@ describe("AuthService.refresh", () => {
     await expect(env.auth.refresh(TENANT, first.refreshToken)).rejects.toBeInstanceOf(
       UnauthenticatedError,
     );
+  });
+
+  it("permite apenas uma rotacao quando duas requisicoes usam o mesmo token", async () => {
+    const env = buildAuth();
+    await seedActiveUser(env.users, TENANT, "dra@clinica.com", "senha-forte");
+    const first = await env.auth.login({
+      tenantId: TENANT,
+      email: "dra@clinica.com",
+      password: "senha-forte",
+    });
+
+    const results = await Promise.allSettled([
+      env.auth.refresh(TENANT, first.refreshToken),
+      env.auth.refresh(TENANT, first.refreshToken),
+    ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
   });
 });

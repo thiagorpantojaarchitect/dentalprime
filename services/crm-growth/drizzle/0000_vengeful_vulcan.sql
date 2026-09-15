@@ -1,3 +1,7 @@
+CREATE SCHEMA IF NOT EXISTS "crm_growth";
+--> statement-breakpoint
+SET search_path TO "crm_growth", public;
+--> statement-breakpoint
 CREATE TABLE "audit_log" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"tenant_id" uuid NOT NULL,

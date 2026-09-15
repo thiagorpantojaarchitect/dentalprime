@@ -9,6 +9,7 @@ import type {
   Anamnesis,
   AuditEntry,
   ClinicalRecord,
+  ClinicalDocument,
   ConsentStatus,
   OdontogramEntry,
   Patient,
@@ -40,11 +41,18 @@ export interface UpdatePatientInput {
 export interface PatientRepository {
   findById(tenantId: TenantId, patientId: PatientId): Promise<Patient | null>;
   findByCpf(tenantId: TenantId, cpf: string): Promise<Patient | null>;
+  findByPortalUserId(tenantId: TenantId, portalUserId: UserId): Promise<Patient | null>;
   create(input: CreatePatientInput): Promise<Patient>;
   update(
     tenantId: TenantId,
     patientId: PatientId,
     input: UpdatePatientInput,
+  ): Promise<Patient>;
+  linkPortalUser(
+    tenantId: TenantId,
+    patientId: PatientId,
+    portalUserId: UserId,
+    updatedBy: UserId,
   ): Promise<Patient>;
 }
 
@@ -115,6 +123,24 @@ export interface OdontogramRepository {
     critical: boolean;
     authorUserId: UserId;
   }): Promise<OdontogramEntry>;
+}
+
+export interface ClinicalDocumentRepository {
+  create(input: {
+    tenantId: TenantId;
+    patientId: PatientId;
+    kind: string;
+    fileName: string;
+    contentType: string;
+    storageKey: string;
+    sizeBytes: number;
+    uploadedBy: UserId;
+  }): Promise<ClinicalDocument>;
+  findById(
+    tenantId: TenantId,
+    patientId: PatientId,
+    documentId: string,
+  ): Promise<ClinicalDocument | null>;
 }
 
 export interface AuditRepository {

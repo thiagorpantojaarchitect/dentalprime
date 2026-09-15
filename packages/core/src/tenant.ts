@@ -19,6 +19,7 @@ export type UserId = string;
 
 /** Papeis clinicos e administrativos (RBAC). Ver modulo identity-access. */
 export type Role =
+  | "platform-admin"
   | "owner"
   | "manager"
   | "dentist"

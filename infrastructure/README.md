@@ -1,62 +1,50 @@
-# infrastructure/
+# Infraestrutura AWS do DentalPrime
 
-Infraestrutura como código (AWS CDK, TypeScript). **Nada é provisionado sem
-aprovação explícita.** A operação padrão é a síntese (`cdk synth`); deploy e
-bootstrap usam funções IAM dedicadas por ambiente, com aprovação. Autenticar no
-Kiro não concede permissão de deploy.
-
-Ver spec em `.kiro/specs/infrastructure/`, `documentation/architecture-aws.md` e
-`.kiro/steering/architecture.md`.
+AWS CDK em TypeScript para development, staging e production. A implantação
+suportada nesta entrega é development e ocorre pelo workflow
+deploy-development.
 
 ## Stacks
 
-Compostas por ambiente em `bin/app.ts` (dependências por props/ARN, sem ciclo):
+| Ordem | Stack | Responsabilidade |
+| --- | --- | --- |
+| 1 | Network | VPC, subnets, NAT, endpoints e flow logs |
+| 2 | Security | KMS e segredos gerados |
+| 3 | Registry | sete repositórios ECR imutáveis |
+| 4 | Data | Aurora, Redis AUTH, S3 clínico e AWS Backup |
+| 5 | Messaging | EventBridge, reminder queue e DLQ |
+| 6 | Compute | ECS, task definitions, migrations e ALB/rewrite |
+| 7 | Edge | WAF, dois sites S3 e duas distribuições CloudFront |
+| 8 | Observability | CloudTrail, dashboard e alarmes |
 
-- **network** — VPC multi-AZ (público/privado/isolado), NAT, VPC endpoints
-  (S3, Secrets Manager, ECR, CloudWatch Logs), flow logs.
-- **security** — KMS (dados, logs, backups) com rotação; Secrets Manager
-  (credenciais de banco, segredo JWT compartilhado, chaves de IA placeholder).
-- **data** — Aurora PostgreSQL (Multi-AZ em prod, IAM auth), ElastiCache Redis,
-  bucket S3 de documentos clínicos (KMS, block public, versionado, TLS).
-- **messaging** — EventBridge bus + filas SQS com DLQ (criptografadas).
-- **identity** — Cognito User Pool (senha forte, MFA, atributo `tenantId`).
-- **compute** — ECS Fargate: cluster + 7 serviços (portas 3001-3007) atrás de
-  ALB (roteamento por path), segredos injetados em runtime, autoscaling em prod.
-- **edge** — CloudFront (OAC para o bucket estático do clinic-web, behavior
-  `/api/*` para o ALB) + WAF (regras gerenciadas + rate limit). Em `us-east-1`.
-- **observability** — CloudTrail (bucket dedicado, KMS), grupo de log central.
+Registry fica separado de Compute para permitir o primeiro build. Compute aceita
+desiredCount=0, registra a revisão exata das migrations e só é ativado depois de
+todas elas e do bootstrap idempotente do primeiro tenant concluírem. A
+credencial inicial fica em Secrets Manager e não aparece no workflow.
 
-## Comandos
+## Comandos de validação
 
-Região primária `sa-east-1`. Nomes de recursos com hífens, nunca travessões.
+~~~bash
+npm run typecheck --workspace @dentalprime/infrastructure
+npm test --workspace @dentalprime/infrastructure
+npx cdk synth --strict -c env=development -c account=111111111111 -c desiredCount=0
+~~~
 
-```bash
-# Sintetizar o ambiente de desenvolvimento (padrão)
-npm run synth
+Não execute deploy com a conta sintética. Para implantação, use o workflow
+GitHub Actions e a conta configurada no Environment development.
 
-# Sintetizar outro ambiente
-npx cdk synth -c env=staging
-npx cdk synth -c env=production
+## Contextos
 
-# Verificar tipos e rodar os testes
-npm run typecheck
-npm test
-```
+- env: development, staging ou production.
+- account: conta AWS de 12 dígitos; obrigatório quando não há sessão AWS.
+- imageTag: tag imutável comum às imagens, normalmente o SHA.
+- desiredCount: zero para a fase pré-migração.
+- aiProvider: stub por padrão ou bedrock.
+- bedrockModelId: ID simples ou ARN completo.
+- bedrockGuardrailId e bedrockGuardrailVersion: sempre em par.
+- clinicalDocumentsCorsOrigins: lista separada por vírgulas. Development usa
+  `*` por padrão; staging e production exigem origins HTTPS explícitas.
 
-## Conformidade (cdk-nag)
-
-`AwsSolutionsChecks` (cdk-nag v3) roda na síntese via framework de policy
-validation do CDK. Regras de segurança que podemos atender já estão no código
-(flow logs, IAM auth no RDS, criptografia KMS, block public access, enforceSSL,
-DLQ, MFA em produção). Decisões conscientes desta fase (ex.: logs de acesso e
-certificado ACM próprio quando houver domínio) estão reconhecidas com
-justificativa em `lib/nag-acknowledgements.ts`.
-
-## Notas
-
-- `infrastructure/` é um workspace npm, mas fica fora das project references de
-  build Node do monorepo (é sintetizado pelo CDK via `tsx`), como `apps/clinic-web`.
-- Referências entre stacks são passadas por props tipadas ou por ARN (string),
-  evitando exports frágeis e ciclos de dependência.
-- Imagem de container das tasks é um placeholder (Node) até o pipeline de build
-  e publicação de imagens no ECR ser definido.
+Veja [deployment.md](../documentation/deployment.md) para o runbook completo,
+[github-setup.md](../documentation/github-setup.md) para OIDC e
+[observability.md](../documentation/observability.md) para operação.

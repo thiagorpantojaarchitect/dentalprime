@@ -8,7 +8,15 @@
  * Ver `documentation/data-model.md` e `.kiro/specs/smart-scheduling/design.md`.
  */
 
-import { index, integer, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
+import {
+  boolean,
+  index,
+  integer,
+  pgTable,
+  text,
+  timestamp,
+  uuid,
+} from "drizzle-orm/pg-core";
 
 /** Profissional agendavel (vinculado a um usuario do identity-access). */
 export const providers = pgTable(
@@ -82,6 +90,8 @@ export const appointments = pgTable(
     })
       .notNull()
       .default("booked"),
+    // Excecao explicita usada pelas constraints de exclusao da migracao.
+    allowOverbooking: boolean("allow_overbooking").notNull().default(false),
     notes: text("notes"),
     createdBy: uuid("created_by").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

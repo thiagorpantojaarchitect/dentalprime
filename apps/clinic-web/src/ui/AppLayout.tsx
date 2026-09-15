@@ -34,6 +34,7 @@ export function AppLayout(): JSX.Element {
 
           <div className="nav-group">Administração</div>
           <NavLink to="/usuarios">Usuários</NavLink>
+          <NavLink to="/seguranca">Segurança</NavLink>
         </nav>
       </aside>
       <main className="content">

@@ -12,6 +12,14 @@ import type {
   TokenPair,
 } from "./types.js";
 
+export interface PageResult<T> {
+  readonly items: readonly T[];
+  /** Numero da pagina no contrato HTTP (base 1). */
+  readonly page: number;
+  readonly pageSize: number;
+  readonly hasMore: boolean;
+}
+
 /** API de autenticacao (identity-access). */
 export class AuthApi {
   constructor(private readonly client: ApiClient) {}
@@ -39,6 +47,18 @@ export class AuthApi {
       public: true,
     });
   }
+
+  async activate(
+    tenantId: string,
+    activationToken: string,
+    password: string,
+  ): Promise<void> {
+    await this.client.request<void>("/users/activate", {
+      method: "POST",
+      body: { tenantId, activationToken, password },
+      public: true,
+    });
+  }
 }
 
 /** API de gestao de rede (identity-access): tenants, unidades e usuarios. */
@@ -49,9 +69,19 @@ export class NetworkApi {
     return this.client.request<Tenant>("/tenants/current");
   }
 
-  async listTenants(): Promise<readonly Tenant[]> {
-    const res = await this.client.request<{ tenants: Tenant[] }>("/tenants");
-    return res.tenants;
+  async listTenants(page = 1, pageSize = 10): Promise<PageResult<Tenant>> {
+    const res = await this.client.request<{
+      tenants: Tenant[];
+      page: number;
+      pageSize: number;
+      hasMore: boolean;
+    }>(`/tenants?page=${page}&pageSize=${pageSize}`);
+    return {
+      items: res.tenants,
+      page: res.page ?? page,
+      pageSize: res.pageSize ?? pageSize,
+      hasMore: res.hasMore ?? false,
+    };
   }
 
   async provisionTenant(input: {
@@ -65,9 +95,19 @@ export class NetworkApi {
     });
   }
 
-  async listUnits(): Promise<readonly ClinicUnit[]> {
-    const res = await this.client.request<{ units: ClinicUnit[] }>("/units");
-    return res.units;
+  async listUnits(page = 1, pageSize = 10): Promise<PageResult<ClinicUnit>> {
+    const res = await this.client.request<{
+      units: ClinicUnit[];
+      page: number;
+      pageSize: number;
+      hasMore: boolean;
+    }>(`/units?page=${page}&pageSize=${pageSize}`);
+    return {
+      items: res.units,
+      page: res.page ?? page,
+      pageSize: res.pageSize ?? pageSize,
+      hasMore: res.hasMore ?? false,
+    };
   }
 
   async createUnit(name: string): Promise<ClinicUnit> {
@@ -81,8 +121,25 @@ export class NetworkApi {
     await this.client.request<void>(`/units/${unitId}/deactivate`, { method: "POST" });
   }
 
-  async listUsers(): Promise<readonly NetworkUser[]> {
-    const res = await this.client.request<{ users: NetworkUser[] }>("/users");
-    return res.users;
+  async listUsers(page = 1, pageSize = 10): Promise<PageResult<NetworkUser>> {
+    const res = await this.client.request<{
+      users: NetworkUser[];
+      page: number;
+      pageSize: number;
+      hasMore: boolean;
+    }>(`/users?page=${page}&pageSize=${pageSize}`);
+    return {
+      items: res.users,
+      page: res.page ?? page,
+      pageSize: res.pageSize ?? pageSize,
+      hasMore: res.hasMore ?? false,
+    };
+  }
+
+  async changeOwnPassword(currentPassword: string, newPassword: string): Promise<void> {
+    await this.client.request<void>("/users/me/change-password", {
+      method: "POST",
+      body: { currentPassword, newPassword },
+    });
   }
 }

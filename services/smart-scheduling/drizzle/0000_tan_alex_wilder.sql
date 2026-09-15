@@ -1,3 +1,7 @@
+CREATE SCHEMA IF NOT EXISTS "smart_scheduling";
+--> statement-breakpoint
+SET search_path TO "smart_scheduling", public;
+--> statement-breakpoint
 CREATE TABLE "appointment_status_history" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"tenant_id" uuid NOT NULL,

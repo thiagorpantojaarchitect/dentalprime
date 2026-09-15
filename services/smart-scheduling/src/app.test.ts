@@ -21,6 +21,7 @@ async function issueToken(roles: string[]): Promise<string> {
 }
 
 const patientId = "99999999-9999-9999-9999-999999999999";
+const providerUserId = "33333333-3333-4333-8333-333333333333";
 const T = (h: number): string => `2026-03-10T${String(h).padStart(2, "0")}:00:00.000Z`;
 
 describe("smart-scheduling API", () => {
@@ -86,6 +87,86 @@ describe("smart-scheduling API", () => {
       },
     });
     expect(res.statusCode).toBe(400);
+  });
+
+  it("nega ao patient as leituras tenant-wide sem ownership", async () => {
+    const token = await issueToken(["patient"]);
+    const headers = { authorization: `Bearer ${token}` };
+    const appointmentId = "88888888-8888-4888-8888-888888888888";
+    const requests = [
+      app.inject({ method: "GET", url: `/providers?unitId=${UNIT_A}`, headers }),
+      app.inject({ method: "GET", url: `/resources?unitId=${UNIT_A}`, headers }),
+      app.inject({
+        method: "GET",
+        url: `/appointments/${appointmentId}/status-history`,
+        headers,
+      }),
+      app.inject({
+        method: "GET",
+        url: `/dashboard?from=${T(8)}&to=${T(12)}`,
+        headers,
+      }),
+    ];
+
+    const responses = await Promise.all(requests);
+    expect(responses.map((response) => response.statusCode)).toEqual([
+      403, 403, 403, 403,
+    ]);
+  });
+
+  it("cadastra e lista providers e resources por unidade", async () => {
+    const token = await issueToken(["front-desk"]);
+    const headers = { authorization: `Bearer ${token}` };
+
+    const provider = await app.inject({
+      method: "POST",
+      url: "/providers",
+      headers,
+      payload: {
+        unitId: UNIT_A,
+        userId: providerUserId,
+        displayName: "Dra. Beatriz",
+      },
+    });
+    expect(provider.statusCode).toBe(201);
+    expect(provider.json()).toMatchObject({
+      unitId: UNIT_A,
+      userId: providerUserId,
+      displayName: "Dra. Beatriz",
+    });
+
+    const resource = await app.inject({
+      method: "POST",
+      url: "/resources",
+      headers,
+      payload: { unitId: UNIT_A, name: "Sala 2", kind: "room" },
+    });
+    expect(resource.statusCode).toBe(201);
+    expect(resource.json()).toMatchObject({
+      unitId: UNIT_A,
+      name: "Sala 2",
+      kind: "room",
+    });
+
+    const providers = await app.inject({
+      method: "GET",
+      url: `/providers?unitId=${UNIT_A}`,
+      headers,
+    });
+    expect(providers.statusCode).toBe(200);
+    expect(providers.json().providers).toEqual(
+      expect.arrayContaining([expect.objectContaining({ displayName: "Dra. Beatriz" })]),
+    );
+
+    const resources = await app.inject({
+      method: "GET",
+      url: `/resources?unitId=${UNIT_A}`,
+      headers,
+    });
+    expect(resources.statusCode).toBe(200);
+    expect(resources.json().resources).toEqual([
+      expect.objectContaining({ name: "Sala 2", kind: "room" }),
+    ]);
   });
 
   it("GET /dashboard exige token, valida query e agrega por status", async () => {

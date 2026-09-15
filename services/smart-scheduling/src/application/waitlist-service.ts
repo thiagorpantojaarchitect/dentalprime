@@ -11,8 +11,9 @@
 import type { ClinicUnitId, TenantContext } from "@dentalprime/core";
 
 import { AuthorizationService } from "../domain/authorization.js";
+import { NotFoundError } from "../domain/errors.js";
 import type { PatientId, ProviderId, WaitlistEntry } from "../domain/models.js";
-import type { WaitlistRepository } from "../domain/repositories.js";
+import type { ProviderRepository, WaitlistRepository } from "../domain/repositories.js";
 import type { AuditService } from "./audit-service.js";
 
 export interface AddToWaitlistInput {
@@ -24,6 +25,7 @@ export interface AddToWaitlistInput {
 
 export interface WaitlistServiceDeps {
   readonly waitlist: WaitlistRepository;
+  readonly providers: ProviderRepository;
   readonly audit: AuditService;
   readonly authorization: AuthorizationService;
 }
@@ -33,7 +35,21 @@ export class WaitlistService {
 
   /** Adiciona um paciente a lista de espera. Requer appointment:manage. */
   async add(actor: TenantContext, input: AddToWaitlistInput): Promise<WaitlistEntry> {
-    this.deps.authorization.ensure(actor, "appointment:manage", actor.tenantId);
+    this.deps.authorization.ensureUnit(
+      actor,
+      "appointment:manage",
+      actor.tenantId,
+      input.unitId,
+    );
+    if (input.providerId) {
+      const provider = await this.deps.providers.findById(
+        actor.tenantId,
+        input.providerId,
+      );
+      if (!provider || provider.unitId !== input.unitId) {
+        throw new NotFoundError("Profissional nao encontrado nesta unidade.");
+      }
+    }
 
     const entry = await this.deps.waitlist.add({
       tenantId: actor.tenantId,
@@ -64,7 +80,14 @@ export class WaitlistService {
     providerId: ProviderId,
     limit = 5,
   ): Promise<WaitlistEntry[]> {
-    this.deps.authorization.ensure(actor, "appointment:read", actor.tenantId);
+    const provider = await this.deps.providers.findById(actor.tenantId, providerId);
+    if (!provider) throw new NotFoundError("Profissional nao encontrado.");
+    this.deps.authorization.ensureUnit(
+      actor,
+      "appointment:read",
+      actor.tenantId,
+      provider.unitId,
+    );
     const active = await this.deps.waitlist.listActiveForProvider(
       actor.tenantId,
       providerId,
@@ -74,7 +97,14 @@ export class WaitlistService {
 
   /** Marca uma entrada como atendida (apos encaixe confirmado). Requer appointment:manage. */
   async markFulfilled(actor: TenantContext, entryId: string): Promise<void> {
-    this.deps.authorization.ensure(actor, "appointment:manage", actor.tenantId);
+    const entry = await this.deps.waitlist.findById(actor.tenantId, entryId);
+    if (!entry) throw new NotFoundError("Entrada da lista de espera nao encontrada.");
+    this.deps.authorization.ensureUnit(
+      actor,
+      "appointment:manage",
+      actor.tenantId,
+      entry.unitId,
+    );
     await this.deps.waitlist.markFulfilled(actor.tenantId, entryId);
     await this.deps.audit.record({
       tenantId: actor.tenantId,

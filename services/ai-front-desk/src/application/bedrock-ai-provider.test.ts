@@ -14,6 +14,11 @@ interface SentCommand {
     readonly system?: ReadonlyArray<{ text?: string }>;
     readonly messages?: unknown;
     readonly inferenceConfig?: { maxTokens?: number; temperature?: number };
+    readonly guardrailConfig?: {
+      readonly guardrailIdentifier?: string;
+      readonly guardrailVersion?: string;
+      readonly trace?: string;
+    };
   };
 }
 
@@ -81,6 +86,26 @@ describe("BedrockAIProvider.reply", () => {
 
     expect(text.length).toBeGreaterThan(0);
     expect(text).toContain("profissional da clinica");
+  });
+
+  it("aplica guardrail versionado com trace desabilitado", async () => {
+    const client = makeClient("ok");
+    const provider = new BedrockAIProvider({
+      client: client as unknown as BedrockRuntimeClient,
+      modelId: "test-model",
+      maxTokens: 512,
+      guardrailId: "guardrail-1",
+      guardrailVersion: "3",
+    });
+
+    await provider.reply("oi");
+
+    expect(client.last().input.inferenceConfig?.maxTokens).toBe(512);
+    expect(client.last().input.guardrailConfig).toEqual({
+      guardrailIdentifier: "guardrail-1",
+      guardrailVersion: "3",
+      trace: "disabled",
+    });
   });
 });
 

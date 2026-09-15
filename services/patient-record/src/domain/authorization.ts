@@ -12,16 +12,19 @@ import type { Role, TenantContext } from "@dentalprime/core";
 
 import { ForbiddenError } from "./errors.js";
 
-export type Action = "patient:read" | "patient:manage";
+export type Action = "patient:read" | "patient:manage" | "patient:self-read";
 
 const ROLE_PERMISSIONS: Readonly<Record<Role, readonly Action[]>> = {
+  "platform-admin": [],
   owner: ["patient:read", "patient:manage"],
   manager: ["patient:read", "patient:manage"],
   dentist: ["patient:read", "patient:manage"],
   specialist: ["patient:read", "patient:manage"],
   assistant: ["patient:read"],
   "front-desk": ["patient:read", "patient:manage"],
-  patient: [],
+  // O papel patient nunca recebe leitura generica; self-read ainda exige que
+  // actor.userId esteja vinculado ao cadastro dentro do mesmo tenant.
+  patient: ["patient:self-read"],
 };
 
 function roleGrants(roles: readonly Role[], action: Action): boolean {

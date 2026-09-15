@@ -1,19 +1,18 @@
 /**
- * EdgeStack: borda de entrega e protecao.
+ * EdgeStack: dois frontends privados, CloudFront, WAF e origem de API.
  *
- * O frontend (clinic-web) e servido de um bucket S3 privado via CloudFront com
- * Origin Access Control (OAC), sem acesso publico direto ao bucket. Um behavior
- * de origem encaminha /api/* ao ALB. Um WAF com regras gerenciadas e limitacao
- * de taxa protege a distribuicao.
- *
- * Nota sobre regiao: o WAF de escopo CLOUDFRONT e o certificado ACM usado pelo
- * CloudFront residem em us-east-1. Este stack cria o WebACL com escopo
- * CLOUDFRONT; ao implantar de verdade, ele deve ser sintetizado/implantado em
- * us-east-1 (documentado no design). Certificado ACM e Route53 sao placeholders,
- * habilitados quando houver dominio.
+ * CloudFront preserva /api/<dominio> ate o ALB. O listener casa esse caminho e
+ * aplica o URL rewrite antes de entregar a rota nativa ao Fastify.
  */
 
-import { Duration, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
+import {
+  CfnOutput,
+  Duration,
+  RemovalPolicy,
+  SecretValue,
+  Stack,
+  type StackProps,
+} from "aws-cdk-lib";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
 import * as s3 from "aws-cdk-lib/aws-s3";
@@ -25,33 +24,37 @@ import { RESOURCE_PREFIX } from "./constants.js";
 
 export interface EdgeStackProps extends StackProps {
   readonly envConfig: EnvironmentConfig;
-  /** DNS publico do ALB (origem /api/*). Passado como string p/ evitar
-   * acoplamento de recurso entre regioes. */
   readonly loadBalancerDnsName: string;
+  /** Nome do segredo replicado em us-east-1; o valor nunca cruza o contexto. */
+  readonly cloudFrontOriginTokenSecretName: string;
+}
+
+interface FrontendDistribution {
+  readonly bucket: s3.Bucket;
+  readonly distribution: cloudfront.Distribution;
 }
 
 export class EdgeStack extends Stack {
-  public readonly distribution: cloudfront.Distribution;
-  public readonly webBucket: s3.Bucket;
+  public readonly clinicDistribution: cloudfront.Distribution;
+  public readonly adminDistribution: cloudfront.Distribution;
+  public readonly clinicWebBucket: s3.Bucket;
+  public readonly adminWebBucket: s3.Bucket;
   public readonly webAcl: wafv2.CfnWebACL;
 
   constructor(scope: Construct, id: string, props: EdgeStackProps) {
     super(scope, id, props);
-    const { envConfig, loadBalancerDnsName } = props;
+    const { envConfig, loadBalancerDnsName, cloudFrontOriginTokenSecretName } = props;
     const suffix = envConfig.name;
 
-    // Bucket estatico privado do frontend.
-    this.webBucket = new s3.Bucket(this, "WebBucket", {
-      bucketName: `${RESOURCE_PREFIX}-clinic-web-${suffix}`,
+    const accessLogsBucket = new s3.Bucket(this, "EdgeAccessLogs", {
       encryption: s3.BucketEncryption.S3_MANAGED,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       enforceSSL: true,
-      versioned: true,
+      objectOwnership: s3.ObjectOwnership.OBJECT_WRITER,
       removalPolicy: envConfig.removalPolicy,
       autoDeleteObjects: envConfig.removalPolicy === RemovalPolicy.DESTROY,
     });
 
-    // WAF: regras gerenciadas + rate limiting. Escopo CLOUDFRONT (us-east-1).
     this.webAcl = new wafv2.CfnWebACL(this, "WebAcl", {
       name: `${RESOURCE_PREFIX}-webacl-${suffix}`,
       scope: "CLOUDFRONT",
@@ -100,7 +103,7 @@ export class EdgeStack extends Stack {
           action: { block: {} },
           statement: {
             rateBasedStatement: {
-              limit: 2000,
+              limit: envConfig.isProduction ? 2000 : 500,
               aggregateKeyType: "IP",
             },
           },
@@ -113,21 +116,107 @@ export class EdgeStack extends Stack {
       ],
     });
 
+    const originToken = SecretValue.secretsManager(
+      cloudFrontOriginTokenSecretName,
+    ).unsafeUnwrap();
     const albOrigin = new origins.HttpOrigin(loadBalancerDnsName, {
       protocolPolicy: cloudfront.OriginProtocolPolicy.HTTP_ONLY,
+      customHeaders: { "x-dentalprime-origin": originToken },
+      connectionAttempts: 3,
+      connectionTimeout: Duration.seconds(10),
     });
 
-    this.distribution = new cloudfront.Distribution(this, "Distribution", {
-      comment: `${RESOURCE_PREFIX}-${suffix}`,
+    const clinic = this.createFrontend(
+      "Clinic",
+      `${RESOURCE_PREFIX}-clinic-${suffix}`,
+      albOrigin,
+      accessLogsBucket,
+      envConfig,
+    );
+    const admin = this.createFrontend(
+      "Admin",
+      `${RESOURCE_PREFIX}-admin-${suffix}`,
+      albOrigin,
+      accessLogsBucket,
+      envConfig,
+    );
+    this.clinicWebBucket = clinic.bucket;
+    this.clinicDistribution = clinic.distribution;
+    this.adminWebBucket = admin.bucket;
+    this.adminDistribution = admin.distribution;
+
+    new CfnOutput(this, "ClinicWebBucketName", {
+      value: this.clinicWebBucket.bucketName,
+    });
+    new CfnOutput(this, "ClinicDistributionId", {
+      value: this.clinicDistribution.distributionId,
+    });
+    new CfnOutput(this, "ClinicUrl", {
+      value: `https://${this.clinicDistribution.distributionDomainName}`,
+    });
+    new CfnOutput(this, "AdminWebBucketName", {
+      value: this.adminWebBucket.bucketName,
+    });
+    new CfnOutput(this, "AdminDistributionId", {
+      value: this.adminDistribution.distributionId,
+    });
+    new CfnOutput(this, "AdminUrl", {
+      value: `https://${this.adminDistribution.distributionDomainName}`,
+    });
+  }
+
+  private createFrontend(
+    id: string,
+    comment: string,
+    albOrigin: origins.HttpOrigin,
+    accessLogsBucket: s3.IBucket,
+    envConfig: EnvironmentConfig,
+  ): FrontendDistribution {
+    const destroy = envConfig.removalPolicy === RemovalPolicy.DESTROY;
+    const bucket = new s3.Bucket(this, `${id}WebBucket`, {
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
+      versioned: true,
+      removalPolicy: envConfig.removalPolicy,
+      autoDeleteObjects: destroy,
+      serverAccessLogsBucket: accessLogsBucket,
+      serverAccessLogsPrefix: `${id.toLowerCase()}-web/`,
+    });
+
+    const spaRewrite = new cloudfront.Function(this, `${id}SpaRewrite`, {
+      runtime: cloudfront.FunctionRuntime.JS_2_0,
+      comment: `SPA rewrite do frontend ${id.toLowerCase()}`,
+      code: cloudfront.FunctionCode.fromInline(`function handler(event) {
+  var request = event.request;
+  var uri = request.uri;
+  if (!uri.startsWith('/api/') && !uri.includes('.')) {
+    request.uri = '/index.html';
+  }
+  return request;
+}`),
+    });
+
+    const distribution = new cloudfront.Distribution(this, `${id}Distribution`, {
+      comment,
       defaultRootObject: "index.html",
       webAclId: this.webAcl.attrArn,
-      // minimumProtocolVersion so tem efeito com certificado ACM proprio; sera
-      // definido ao configurar dominio (TLSv1.2_2021).
+      httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
+      priceClass: cloudfront.PriceClass.PRICE_CLASS_100,
+      enableLogging: true,
+      logBucket: accessLogsBucket,
+      logFilePrefix: `${id.toLowerCase()}-cloudfront/`,
       defaultBehavior: {
-        // Frontend estatico (OAC configurado automaticamente pelo origin S3).
-        origin: origins.S3BucketOrigin.withOriginAccessControl(this.webBucket),
+        origin: origins.S3BucketOrigin.withOriginAccessControl(bucket),
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+        responseHeadersPolicy: cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS,
+        functionAssociations: [
+          {
+            eventType: cloudfront.FunctionEventType.VIEWER_REQUEST,
+            function: spaRewrite,
+          },
+        ],
       },
       additionalBehaviors: {
         "/api/*": {
@@ -137,23 +226,11 @@ export class EdgeStack extends Stack {
           cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
           originRequestPolicy:
             cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+          responseHeadersPolicy: cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS,
         },
       },
-      // SPA: rotas do cliente caem em index.html.
-      errorResponses: [
-        {
-          httpStatus: 403,
-          responseHttpStatus: 200,
-          responsePagePath: "/index.html",
-          ttl: Duration.minutes(5),
-        },
-        {
-          httpStatus: 404,
-          responseHttpStatus: 200,
-          responsePagePath: "/index.html",
-          ttl: Duration.minutes(5),
-        },
-      ],
     });
+
+    return { bucket, distribution };
   }
 }

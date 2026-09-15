@@ -7,6 +7,7 @@
  */
 
 interface ImportMetaEnvLike {
+  readonly VITE_API_BASE_URL?: string;
   readonly VITE_IDENTITY_URL?: string;
 }
 
@@ -21,7 +22,8 @@ export interface ServiceUrls {
 
 export function getServiceUrls(): ServiceUrls {
   const env = readEnv();
+  const apiBaseUrl = env.VITE_API_BASE_URL?.trim().replace(/\/$/, "");
   return {
-    identity: env.VITE_IDENTITY_URL ?? "http://localhost:3001",
+    identity: env.VITE_IDENTITY_URL ?? `${apiBaseUrl ?? ""}/api/identity`,
   };
 }

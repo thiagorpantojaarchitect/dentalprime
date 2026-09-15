@@ -13,6 +13,7 @@ import { ForbiddenError } from "./errors.js";
 export type Action = "finance:read" | "finance:manage";
 
 const ROLE_PERMISSIONS: Readonly<Record<Role, readonly Action[]>> = {
+  "platform-admin": [],
   owner: ["finance:read", "finance:manage"],
   manager: ["finance:read", "finance:manage"],
   "front-desk": ["finance:read", "finance:manage"],

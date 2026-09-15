@@ -1,6 +1,6 @@
 /**
  * Ponto de entrada do admin-portal. Monta o AuthProvider (com SessionStore em
- * localStorage) e o roteador.
+ * sessionStorage) e o roteador. Tokens nao permanecem depois que a aba fecha.
  */
 
 import { StrictMode } from "react";
@@ -18,7 +18,7 @@ if (!rootEl) {
   throw new Error("Elemento #root nao encontrado.");
 }
 
-const store = new SessionStore(window.localStorage);
+const store = new SessionStore(window.sessionStorage);
 const urls = getServiceUrls();
 
 createRoot(rootEl).render(

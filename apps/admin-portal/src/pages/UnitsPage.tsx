@@ -15,8 +15,11 @@ import {
   ErrorBanner,
   Field,
   PageHeader,
+  Pagination,
   StatusBadge,
 } from "../ui/components.js";
+
+const PAGE_SIZE = 10;
 
 function unitError(err: unknown, fallback: string): string {
   if (err instanceof ApiError) {
@@ -33,28 +36,36 @@ export function UnitsPage(): JSX.Element {
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
 
-  const load = useCallback(async (): Promise<void> => {
-    setError(null);
-    try {
-      setUnits(await network.listUnits());
-    } catch (err) {
-      setError(unitError(err, "Não foi possível carregar as unidades."));
-    } finally {
-      setLoaded(true);
-    }
-  }, [network]);
+  const load = useCallback(
+    async (requestedPage: number): Promise<void> => {
+      setError(null);
+      try {
+        const result = await network.listUnits(requestedPage, PAGE_SIZE);
+        setUnits(result.items);
+        setHasMore(result.hasMore);
+      } catch (err) {
+        setError(unitError(err, "Não foi possível carregar as unidades."));
+      } finally {
+        setLoaded(true);
+      }
+    },
+    [network],
+  );
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    void load(page);
+  }, [load, page]);
 
   const create = async (): Promise<void> => {
     setError(null);
     try {
       await network.createUnit(name);
       setName("");
-      await load();
+      if (page === 1) await load(1);
+      else setPage(1);
     } catch (err) {
       setError(unitError(err, "Não foi possível criar a unidade."));
     }
@@ -64,7 +75,7 @@ export function UnitsPage(): JSX.Element {
     setError(null);
     try {
       await network.deactivateUnit(unitId);
-      await load();
+      await load(page);
     } catch (err) {
       setError(unitError(err, "Não foi possível desativar a unidade."));
     }
@@ -123,6 +134,7 @@ export function UnitsPage(): JSX.Element {
             </tbody>
           </table>
         )}
+        <Pagination page={page} hasMore={hasMore} onPageChange={setPage} />
       </div>
     </section>
   );

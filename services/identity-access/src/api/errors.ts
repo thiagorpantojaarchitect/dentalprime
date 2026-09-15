@@ -30,6 +30,19 @@ export function sendError(reply: FastifyReply, error: unknown): FastifyReply {
       .status(status)
       .send({ error: { code: error.code, message: error.message } });
   }
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "statusCode" in error &&
+    error.statusCode === 429
+  ) {
+    return reply.status(429).send({
+      error: {
+        code: "RATE_LIMITED",
+        message: "Muitas tentativas. Tente novamente mais tarde.",
+      },
+    });
+  }
   reply.log.error(error);
   return reply
     .status(500)

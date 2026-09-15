@@ -26,6 +26,14 @@ export interface Provider {
   readonly displayName: string;
 }
 
+export interface Resource {
+  readonly id: ResourceId;
+  readonly tenantId: TenantId;
+  readonly unitId: ClinicUnitId;
+  readonly name: string;
+  readonly kind: string;
+}
+
 export interface Availability {
   readonly id: string;
   readonly tenantId: TenantId;
@@ -47,6 +55,8 @@ export interface Appointment {
   readonly startsAt: Date;
   readonly endsAt: Date;
   readonly status: AppointmentStatus;
+  /** Politica excepcional registrada na propria reserva. */
+  readonly allowOverbooking: boolean;
   readonly notes: string | null;
 }
 

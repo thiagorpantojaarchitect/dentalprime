@@ -4,7 +4,7 @@
  */
 
 import { useState, type FormEvent } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import { ApiError } from "../api/client.js";
 import { useAuth } from "../auth/auth-context.js";
@@ -12,6 +12,7 @@ import { useAuth } from "../auth/auth-context.js";
 export function LoginPage(): JSX.Element {
   const { login } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
 
   const [tenantId, setTenantId] = useState("");
   const [email, setEmail] = useState("");
@@ -42,6 +43,11 @@ export function LoginPage(): JSX.Element {
     <div className="login-page">
       <form className="card" onSubmit={(e) => void onSubmit(e)} aria-label="Entrar">
         <h2>Entrar</h2>
+        {searchParams.get("senha") === "alterada" ? (
+          <p className="notice" role="status">
+            Senha alterada. Entre novamente.
+          </p>
+        ) : null}
         <div className="field">
           <label htmlFor="tenantId">Clínica (tenant)</label>
           <input
@@ -75,6 +81,9 @@ export function LoginPage(): JSX.Element {
         <button type="submit" disabled={submitting}>
           {submitting ? "Entrando..." : "Entrar"}
         </button>
+        <p className="muted">
+          Primeiro acesso? <Link to="/ativar">Ative seu convite</Link>.
+        </p>
       </form>
     </div>
   );

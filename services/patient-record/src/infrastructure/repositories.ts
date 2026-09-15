@@ -10,6 +10,7 @@ import { and, desc, eq, isNull } from "drizzle-orm";
 
 import type {
   Anamnesis,
+  ClinicalDocument,
   ClinicalRecord,
   ConsentStatus,
   OdontogramEntry,
@@ -21,6 +22,7 @@ import type {
   AnamnesisRepository,
   AuditRepository,
   ClinicalRecordRepository,
+  ClinicalDocumentRepository,
   ConsentRepository,
   CreatePatientInput,
   OdontogramRepository,
@@ -33,6 +35,7 @@ import {
   anamneses,
   auditLogs,
   clinicalRecords,
+  clinicalDocuments,
   odontogramEntries,
   patientConsents,
   patients,
@@ -42,6 +45,7 @@ function toPatient(row: typeof patients.$inferSelect): Patient {
   return {
     id: row.id,
     tenantId: row.tenantId,
+    portalUserId: row.portalUserId,
     fullName: row.fullName,
     cpf: row.cpf,
     birthDate: row.birthDate,
@@ -69,6 +73,20 @@ export class DrizzlePatientRepository implements PatientRepository {
       .select()
       .from(patients)
       .where(and(eq(patients.tenantId, tenantId), eq(patients.cpf, cpf)))
+      .limit(1);
+    return rows[0] ? toPatient(rows[0]) : null;
+  }
+
+  async findByPortalUserId(
+    tenantId: TenantId,
+    portalUserId: UserId,
+  ): Promise<Patient | null> {
+    const rows = await this.db
+      .select()
+      .from(patients)
+      .where(
+        and(eq(patients.tenantId, tenantId), eq(patients.portalUserId, portalUserId)),
+      )
       .limit(1);
     return rows[0] ? toPatient(rows[0]) : null;
   }
@@ -110,6 +128,20 @@ export class DrizzlePatientRepository implements PatientRepository {
     const rows = await this.db
       .update(patients)
       .set(set)
+      .where(and(eq(patients.tenantId, tenantId), eq(patients.id, patientId)))
+      .returning();
+    return toPatient(rows[0]!);
+  }
+
+  async linkPortalUser(
+    tenantId: TenantId,
+    patientId: PatientId,
+    portalUserId: UserId,
+    updatedBy: UserId,
+  ): Promise<Patient> {
+    const rows = await this.db
+      .update(patients)
+      .set({ portalUserId, updatedAt: new Date(), updatedBy })
       .where(and(eq(patients.tenantId, tenantId), eq(patients.id, patientId)))
       .returning();
     return toPatient(rows[0]!);
@@ -409,6 +441,60 @@ export class DrizzleOdontogramRepository implements OdontogramRepository {
       authorUserId: row.authorUserId,
       createdAt: row.createdAt,
     };
+  }
+}
+
+function toClinicalDocument(
+  row: typeof clinicalDocuments.$inferSelect,
+): ClinicalDocument {
+  return {
+    id: row.id,
+    tenantId: row.tenantId,
+    patientId: row.patientId,
+    kind: row.kind,
+    fileName: row.fileName,
+    contentType: row.contentType,
+    storageKey: row.storageKey,
+    sizeBytes: row.sizeBytes ?? 0,
+    uploadedBy: row.uploadedBy,
+    createdAt: row.createdAt,
+  };
+}
+
+export class DrizzleClinicalDocumentRepository implements ClinicalDocumentRepository {
+  constructor(private readonly db: Database) {}
+
+  async create(input: {
+    tenantId: TenantId;
+    patientId: PatientId;
+    kind: string;
+    fileName: string;
+    contentType: string;
+    storageKey: string;
+    sizeBytes: number;
+    uploadedBy: UserId;
+  }): Promise<ClinicalDocument> {
+    const rows = await this.db.insert(clinicalDocuments).values(input).returning();
+    return toClinicalDocument(rows[0]!);
+  }
+
+  async findById(
+    tenantId: TenantId,
+    patientId: PatientId,
+    documentId: string,
+  ): Promise<ClinicalDocument | null> {
+    const rows = await this.db
+      .select()
+      .from(clinicalDocuments)
+      .where(
+        and(
+          eq(clinicalDocuments.tenantId, tenantId),
+          eq(clinicalDocuments.patientId, patientId),
+          eq(clinicalDocuments.id, documentId),
+        ),
+      )
+      .limit(1);
+    return rows[0] ? toClinicalDocument(rows[0]) : null;
   }
 }
 

@@ -22,6 +22,11 @@ on:
         type: choice
         options: [development, staging, production]
         default: development
+      aiProvider:
+        description: Provedor de IA (stub somente em development)
+        type: choice
+        options: [stub, bedrock]
+        default: stub
 
 concurrency:
   group: release-${{ github.ref }}
@@ -33,10 +38,51 @@ permissions:
 
 env:
   AWS_REGION: sa-east-1
+  IMAGE_TAG: ${{ github.sha }}
+  AI_PROVIDER: ${{ inputs.aiProvider }}
+  BEDROCK_MODEL_ID: ${{ vars.BEDROCK_MODEL_ID }}
+  BEDROCK_GUARDRAIL_ID: ${{ vars.BEDROCK_GUARDRAIL_ID }}
+  BEDROCK_GUARDRAIL_VERSION: ${{ vars.BEDROCK_GUARDRAIL_VERSION }}
+  CLINICAL_DOCUMENTS_CORS_ORIGINS: ${{ vars.CLINICAL_DOCUMENTS_CORS_ORIGINS }}
 
 jobs:
+  validate:
+    name: validar release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validar ambiente e IA
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.environment }}" != "development" ] && [ "$AI_PROVIDER" != "bedrock" ]; then
+            echo "Staging e production exigem aiProvider=bedrock." >&2
+            exit 1
+          fi
+          if [ "$AI_PROVIDER" = "bedrock" ] && [ -z "$BEDROCK_MODEL_ID" ]; then
+            echo "BEDROCK_MODEL_ID e obrigatorio para Bedrock." >&2
+            exit 1
+          fi
+          if { [ -n "$BEDROCK_GUARDRAIL_ID" ] && [ -z "$BEDROCK_GUARDRAIL_VERSION" ]; } || \
+             { [ -z "$BEDROCK_GUARDRAIL_ID" ] && [ -n "$BEDROCK_GUARDRAIL_VERSION" ]; }; then
+            echo "BEDROCK_GUARDRAIL_ID e VERSION devem ser configurados juntos." >&2
+            exit 1
+          fi
+          if [ "${{ inputs.environment }}" != "development" ] && [ -z "$CLINICAL_DOCUMENTS_CORS_ORIGINS" ]; then
+            echo "CLINICAL_DOCUMENTS_CORS_ORIGINS e obrigatoria fora de development." >&2
+            exit 1
+          fi
+          if [ "${{ inputs.environment }}" != "development" ]; then
+            while IFS= read -r origin; do
+              if [[ "$origin" != https://* || "$origin" == *'*'* ]]; then
+                echo "Origins CORS de staging/production devem usar HTTPS e nao aceitam wildcard." >&2
+                exit 1
+              fi
+            done < <(tr ',' '\n' <<<"$CLINICAL_DOCUMENTS_CORS_ORIGINS" | xargs -n1)
+          fi
+
   build-push:
     name: build e push das imagens (ECR)
+    needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 40
     strategy:
@@ -52,26 +98,45 @@ jobs:
           - { name: ai-front-desk, port: 3007 }
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Autenticar na AWS (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ vars.AWS_OIDC_ROLE || format('arn:aws:iam::{0}:role/dentalprime-ci-ecr', vars.AWS_ACCOUNT_ID) }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login no ECR
         id: ecr
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
+
+      - name: Confirmar que o RegistryStack foi provisionado
+        run: >-
+          aws ecr describe-repositories
+          --repository-names dentalprime/${{ matrix.service.name }}
+
+      - name: Verificar tag imutavel
+        id: image
+        run: |
+          if aws ecr describe-images \
+            --repository-name "dentalprime/${{ matrix.service.name }}" \
+            --image-ids "imageTag=$IMAGE_TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Configurar Buildx
-        uses: docker/setup-buildx-action@v3
+        if: steps.image.outputs.exists != 'true'
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Build e push da imagem ${{ matrix.service.name }}
-        uses: docker/build-push-action@v6
+        if: steps.image.outputs.exists != 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: ./Dockerfile
+          platforms: linux/amd64
           push: true
           build-args: |
             SERVICE=${{ matrix.service.name }}
@@ -87,10 +152,10 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Configurar Node 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           cache: npm
@@ -99,7 +164,7 @@ jobs:
         run: npm ci
 
       - name: Autenticar na AWS (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ vars.AWS_OIDC_ROLE || format('arn:aws:iam::{0}:role/dentalprime-ci-ecr', vars.AWS_ACCOUNT_ID) }}
           aws-region: ${{ env.AWS_REGION }}
@@ -108,4 +173,15 @@ jobs:
       # NAO faz deploy: a implantacao e um passo manual, aprovado a parte.
       - name: cdk diff
         working-directory: infrastructure
-        run: npx cdk diff -c env=${{ inputs.environment }} -c imageTag=${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          CONTEXT=(-c "env=${{ inputs.environment }}" -c "account=${{ vars.AWS_ACCOUNT_ID }}" -c "imageTag=$IMAGE_TAG" -c "aiProvider=$AI_PROVIDER")
+          if [ "$AI_PROVIDER" = "bedrock" ]; then CONTEXT+=(-c "bedrockModelId=$BEDROCK_MODEL_ID"); fi
+          if [ -n "$BEDROCK_GUARDRAIL_ID" ]; then
+            CONTEXT+=(-c "bedrockGuardrailId=$BEDROCK_GUARDRAIL_ID" -c "bedrockGuardrailVersion=$BEDROCK_GUARDRAIL_VERSION")
+          fi
+          if [ -n "$CLINICAL_DOCUMENTS_CORS_ORIGINS" ]; then
+            CONTEXT+=(-c "clinicalDocumentsCorsOrigins=$CLINICAL_DOCUMENTS_CORS_ORIGINS")
+          fi
+          npx cdk diff --strict "${CONTEXT[@]}"

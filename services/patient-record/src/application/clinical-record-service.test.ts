@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach } from "vitest";
 
+import { ForbiddenError, NotFoundError } from "../domain/errors.js";
 import { buildServices, makeContext, VALID_CPF_1 } from "./test-helpers.js";
+
+const PORTAL_USER_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
 describe("ClinicalRecordService versionamento", () => {
   let env: ReturnType<typeof buildServices>;
@@ -59,5 +62,28 @@ describe("ClinicalRecordService versionamento", () => {
     const actions = env.auditRepo.entries.map((e) => e.action);
     expect(actions).toContain("clinical_record.created");
     expect(actions).toContain("clinical_record.corrected");
+  });
+
+  it("patient vinculado le somente o proprio prontuario pela operacao self", async () => {
+    await env.records.createEntry(actor, {
+      patientId,
+      entryType: "evolution",
+      content: "Registro do proprio paciente.",
+    });
+    await env.patients.linkPortalUser(actor, patientId, PORTAL_USER_ID);
+    const portalActor = makeContext({ userId: PORTAL_USER_ID, roles: ["patient"] });
+
+    await expect(env.records.listForSelf(portalActor)).resolves.toHaveLength(1);
+    await expect(
+      env.records.listForPatient(portalActor, patientId),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+  });
+
+  it("nao libera prontuario sem vinculo explicito", async () => {
+    await expect(
+      env.records.listForSelf(
+        makeContext({ userId: PORTAL_USER_ID, roles: ["patient"] }),
+      ),
+    ).rejects.toBeInstanceOf(NotFoundError);
   });
 });

@@ -14,6 +14,7 @@ import type { Role } from "@dentalprime/core";
  * Novos modulos adicionam suas acoes aqui conforme evoluem.
  */
 export type Action =
+  | "platform:manage"
   | "tenant:read"
   | "tenant:manage"
   | "unit:read"
@@ -34,6 +35,7 @@ export type Action =
  * "patient" tem acesso minimo aos proprios dados (refinado por escopo).
  */
 const ROLE_PERMISSIONS: Readonly<Record<Role, readonly Action[]>> = {
+  "platform-admin": ["platform:manage"],
   owner: [
     "tenant:read",
     "tenant:manage",

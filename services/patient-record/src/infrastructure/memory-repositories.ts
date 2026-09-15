@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 
 import type {
   Anamnesis,
+  ClinicalDocument,
   AuditEntry,
   ClinicalRecord,
   ConsentStatus,
@@ -20,6 +21,7 @@ import type {
   AnamnesisRepository,
   AuditRepository,
   ClinicalRecordRepository,
+  ClinicalDocumentRepository,
   ConsentRepository,
   CreatePatientInput,
   OdontogramRepository,
@@ -42,10 +44,23 @@ export class InMemoryPatientRepository implements PatientRepository {
     return null;
   }
 
+  async findByPortalUserId(
+    tenantId: TenantId,
+    portalUserId: UserId,
+  ): Promise<Patient | null> {
+    for (const patient of this.rows.values()) {
+      if (patient.tenantId === tenantId && patient.portalUserId === portalUserId) {
+        return patient;
+      }
+    }
+    return null;
+  }
+
   async create(input: CreatePatientInput): Promise<Patient> {
     const patient: Patient = {
       id: randomUUID(),
       tenantId: input.tenantId,
+      portalUserId: null,
       fullName: input.fullName,
       cpf: input.cpf,
       birthDate: input.birthDate,
@@ -74,6 +89,19 @@ export class InMemoryPatientRepository implements PatientRepository {
       address: input.address !== undefined ? input.address : current.address,
       active: input.active ?? current.active,
     };
+    this.rows.set(patientId, updated);
+    return updated;
+  }
+
+  async linkPortalUser(
+    tenantId: TenantId,
+    patientId: PatientId,
+    portalUserId: UserId,
+    _updatedBy: UserId,
+  ): Promise<Patient> {
+    const current = await this.findById(tenantId, patientId);
+    if (!current) throw new Error("paciente nao encontrado");
+    const updated = { ...current, portalUserId };
     this.rows.set(patientId, updated);
     return updated;
   }
@@ -259,6 +287,40 @@ export class InMemoryOdontogramRepository implements OdontogramRepository {
     };
     this.rows.push(entry);
     return entry;
+  }
+}
+
+export class InMemoryClinicalDocumentRepository implements ClinicalDocumentRepository {
+  public readonly rows = new Map<string, ClinicalDocument>();
+
+  async create(input: {
+    tenantId: TenantId;
+    patientId: PatientId;
+    kind: string;
+    fileName: string;
+    contentType: string;
+    storageKey: string;
+    sizeBytes: number;
+    uploadedBy: UserId;
+  }): Promise<ClinicalDocument> {
+    const document: ClinicalDocument = {
+      id: randomUUID(),
+      ...input,
+      createdAt: new Date(),
+    };
+    this.rows.set(document.id, document);
+    return document;
+  }
+
+  async findById(
+    tenantId: TenantId,
+    patientId: PatientId,
+    documentId: string,
+  ): Promise<ClinicalDocument | null> {
+    const document = this.rows.get(documentId);
+    return document?.tenantId === tenantId && document.patientId === patientId
+      ? document
+      : null;
   }
 }
 

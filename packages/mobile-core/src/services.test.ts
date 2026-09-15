@@ -34,7 +34,7 @@ describe("AuthApi", () => {
 });
 
 describe("PatientSelfApi", () => {
-  it("le o proprio prontuario por id", async () => {
+  it("le o proprio prontuario pela identidade autenticada", async () => {
     const fetchImpl = vi.fn(async () =>
       jsonResponse(200, {
         id: "pat-1",
@@ -46,8 +46,12 @@ describe("PatientSelfApi", () => {
       }),
     );
     const api = new PatientSelfApi(clientWith(fetchImpl as unknown as typeof fetch));
-    const patient = await api.getMyRecord("pat-1");
+    const patient = await api.getMyRecord();
     expect(patient.fullName).toBe("Maria");
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://api/patients/me",
+      expect.objectContaining({ method: "GET" }),
+    );
   });
 
   it("lista as evolucoes desembrulhando o wrapper", async () => {
@@ -55,9 +59,13 @@ describe("PatientSelfApi", () => {
       jsonResponse(200, { records: [{ recordKey: "r1", version: 1 }] }),
     );
     const api = new PatientSelfApi(clientWith(fetchImpl as unknown as typeof fetch));
-    const records = await api.listMyClinicalRecords("pat-1");
+    const records = await api.listMyClinicalRecords();
     expect(records).toHaveLength(1);
     expect(records[0]?.recordKey).toBe("r1");
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "http://api/patients/me/clinical-records",
+      expect.objectContaining({ method: "GET" }),
+    );
   });
 });
 

@@ -12,6 +12,7 @@ import { ForbiddenError } from "./errors.js";
 export type Action = "crm:read" | "crm:manage";
 
 const ROLE_PERMISSIONS: Readonly<Record<Role, readonly Action[]>> = {
+  "platform-admin": [],
   owner: ["crm:read", "crm:manage"],
   manager: ["crm:read", "crm:manage"],
   "front-desk": ["crm:read", "crm:manage"],

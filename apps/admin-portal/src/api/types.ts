@@ -10,6 +10,7 @@ export interface TokenPair {
 }
 
 export type Role =
+  | "platform-admin"
   | "owner"
   | "manager"
   | "dentist"
@@ -28,6 +29,8 @@ export interface ProvisionedTenant {
   readonly id: string;
   readonly name: string;
   readonly ownerUserId: string;
+  readonly ownerActivationToken: string;
+  readonly ownerActivationExpiresAt: string;
 }
 
 export interface ClinicUnit {

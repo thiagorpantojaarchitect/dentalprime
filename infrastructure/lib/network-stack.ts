@@ -71,12 +71,17 @@ export class NetworkStack extends Stack {
       CloudWatchLogs: ec2.InterfaceVpcEndpointAwsService.CLOUDWATCH_LOGS,
     };
 
-    for (const [id_, service] of Object.entries(interfaceEndpoints)) {
-      this.vpc.addInterfaceEndpoint(`${id_}Endpoint`, {
-        service,
-        subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-        privateDnsEnabled: true,
-      });
+    // Interface endpoints geram custo horario por AZ. Development e staging ja
+    // possuem NAT e usam os endpoints publicos AWS via TLS; producao paga pelos
+    // endpoints privados para reduzir exposicao e dependencia do NAT.
+    if (envConfig.isProduction) {
+      for (const [id_, service] of Object.entries(interfaceEndpoints)) {
+        this.vpc.addInterfaceEndpoint(`${id_}Endpoint`, {
+          service,
+          subnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+          privateDnsEnabled: true,
+        });
+      }
     }
 
     // Saida usada pelo workflow de deploy (rede do run-task de migracao).

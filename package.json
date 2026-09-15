@@ -5,13 +5,15 @@
   "description": "Plataforma brasileira de gestao para clinicas e redes odontologicas",
   "license": "UNLICENSED",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.12.0"
   },
   "workspaces": [
     "packages/*",
     "services/*",
     "apps/clinic-web",
     "apps/admin-portal",
+    "apps/patient-mobile",
+    "apps/professional-mobile",
     "infrastructure"
   ],
   "scripts": {
@@ -21,18 +23,30 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "build:web": "npm run build --workspace @dentalprime/clinic-web && npm run build --workspace @dentalprime/admin-portal",
+    "typecheck:mobile": "npm run typecheck --workspace @dentalprime/patient-mobile && npm run typecheck --workspace @dentalprime/professional-mobile",
+    "test:apps": "npm test --workspace @dentalprime/clinic-web && npm test --workspace @dentalprime/admin-portal && npm run typecheck:mobile",
+    "dev:backend": "docker compose up --build --wait",
+    "bootstrap:development": "docker compose --profile bootstrap up --build --abort-on-container-exit --exit-code-from bootstrap bootstrap",
+    "smoke:backend": "docker compose --profile smoke up --build --abort-on-container-exit --exit-code-from smoke smoke",
+    "verify:development": "npm run build && npm run build:web && npm run typecheck:mobile && npm run lint && npm run format:check && npm test && npm run test:apps && npm run typecheck --workspace @dentalprime/infrastructure && npm run synth --workspace @dentalprime/infrastructure -- --strict -c env=development -c account=111111111111 -c desiredCount=0"
   },
   "devDependencies": {
-    "@eslint/js": "9.18.0",
-    "@types/node": "22.10.5",
+    "@eslint/js": "9.39.5",
+    "@types/node": "22.20.2",
     "@typescript-eslint/eslint-plugin": "8.20.0",
     "@typescript-eslint/parser": "8.20.0",
-    "eslint": "9.18.0",
+    "drizzle-orm": "0.45.2",
+    "eslint": "9.39.5",
     "eslint-config-prettier": "9.1.0",
     "prettier": "3.4.2",
     "typescript": "5.7.3",
-    "vitest": "2.1.8",
-    "@vitest/coverage-v8": "2.1.8"
+    "vite": "6.4.3",
+    "vitest": "5.0.1",
+    "@vitest/coverage-v8": "5.0.1"
+  },
+  "overrides": {
+    "uuid": "11.1.1"
   }
 }

@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { ApiError } from "../api/client.js";
-import type { Tenant } from "../api/types.js";
+import type { ProvisionedTenant, Tenant } from "../api/types.js";
 import { useServices } from "../api/use-services.js";
 import {
   CardForm,
@@ -15,8 +15,11 @@ import {
   ErrorBanner,
   Field,
   PageHeader,
+  Pagination,
   StatusBadge,
 } from "../ui/components.js";
+
+const PAGE_SIZE = 10;
 
 function tenantError(err: unknown, fallback: string): string {
   if (err instanceof ApiError) {
@@ -37,33 +40,44 @@ export function TenantsPage(): JSX.Element {
   const [ownerName, setOwnerName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [provisioned, setProvisioned] = useState<ProvisionedTenant | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
 
-  const load = useCallback(async (): Promise<void> => {
-    setError(null);
-    try {
-      setTenants(await network.listTenants());
-    } catch (err) {
-      setError(tenantError(err, "Não foi possível carregar os tenants."));
-    } finally {
-      setLoaded(true);
-    }
-  }, [network]);
+  const load = useCallback(
+    async (requestedPage: number): Promise<void> => {
+      setError(null);
+      try {
+        const result = await network.listTenants(requestedPage, PAGE_SIZE);
+        setTenants(result.items);
+        setHasMore(result.hasMore);
+      } catch (err) {
+        setError(tenantError(err, "Não foi possível carregar os tenants."));
+      } finally {
+        setLoaded(true);
+      }
+    },
+    [network],
+  );
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    void load(page);
+  }, [load, page]);
 
   const provision = async (): Promise<void> => {
     setError(null);
     setMessage(null);
+    setProvisioned(null);
     try {
       const created = await network.provisionTenant({ name, ownerEmail, ownerName });
       setMessage(`Tenant "${created.name}" provisionado. Owner pendente de ativação.`);
+      setProvisioned(created);
       setName("");
       setOwnerEmail("");
       setOwnerName("");
-      await load();
+      if (page === 1) await load(1);
+      else setPage(1);
     } catch (err) {
       setError(tenantError(err, "Não foi possível provisionar o tenant."));
     }
@@ -105,6 +119,27 @@ export function TenantsPage(): JSX.Element {
         />
         <ErrorBanner message={error} />
         {message ? <p className="muted">{message}</p> : null}
+        {provisioned ? (
+          <div className="notice stack" role="status">
+            <div className="field">
+              <label htmlFor="ownerActivationToken">
+                Token do owner (exibido uma única vez)
+              </label>
+              <input
+                id="ownerActivationToken"
+                value={provisioned.ownerActivationToken}
+                readOnly
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
+            <small>
+              Expira em{" "}
+              {new Date(provisioned.ownerActivationExpiresAt).toLocaleString("pt-BR")}.
+              Compartilhe por canal seguro.
+            </small>
+          </div>
+        ) : null}
         <button type="submit">Provisionar</button>
       </CardForm>
 
@@ -135,6 +170,7 @@ export function TenantsPage(): JSX.Element {
             </tbody>
           </table>
         )}
+        <Pagination page={page} hasMore={hasMore} onPageChange={setPage} />
       </div>
     </section>
   );

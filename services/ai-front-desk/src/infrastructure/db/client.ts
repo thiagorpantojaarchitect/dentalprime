@@ -2,6 +2,11 @@
  * Cliente de banco (Drizzle + node-postgres) do ai-front-desk.
  */
 
+import {
+  databaseSchemaFor,
+  migrationTableFor,
+  postgresSearchPath,
+} from "@dentalprime/core";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 // "pg" e um modulo CommonJS: sob ESM, importar via default e desestruturar.
 import pg from "pg";
@@ -15,12 +20,26 @@ export type Database = NodePgDatabase<typeof schema>;
 export interface DbConnection {
   readonly db: Database;
   readonly pool: pg.Pool;
+  readonly checkReady: () => Promise<void>;
 }
 
+export const DATABASE_SCHEMA = databaseSchemaFor("ai-front-desk");
+export const MIGRATIONS_TABLE = migrationTableFor("ai-front-desk");
+
 export function createDbConnection(connectionString: string): DbConnection {
-  const pool = new Pool({ connectionString });
+  const pool = new Pool({
+    connectionString,
+    options: `-c search_path=${postgresSearchPath(DATABASE_SCHEMA)}`,
+  });
   const db = drizzle(pool, { schema });
-  return { db, pool };
+  const checkReady = async (): Promise<void> => {
+    const result = await pool.query<{ auditLog: string | null }>(
+      'SELECT to_regclass($1)::text AS "auditLog"',
+      [`${DATABASE_SCHEMA}.audit_log`],
+    );
+    if (!result.rows[0]?.auditLog) throw new Error("Database schema is not ready.");
+  };
+  return { db, pool, checkReady };
 }
 
 export { schema };

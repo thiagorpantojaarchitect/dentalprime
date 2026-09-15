@@ -10,6 +10,7 @@ import { z } from "zod";
 import type { AnamnesisService } from "../application/anamnesis-service.js";
 import type { ClinicalRecordService } from "../application/clinical-record-service.js";
 import type { ConsentService } from "../application/consent-service.js";
+import type { DocumentService } from "../application/document-service.js";
 import type { OdontogramService } from "../application/odontogram-service.js";
 import type { PatientRightsService } from "../application/patient-rights-service.js";
 import type { PatientService } from "../application/patient-service.js";
@@ -34,6 +35,8 @@ const updatePatientSchema = z.object({
   active: z.boolean().optional(),
 });
 
+const portalUserLinkSchema = z.object({ portalUserId: z.string().uuid() });
+
 const consentSchema = z.object({
   purpose: z.string().min(1),
   termVersion: z.string().min(1),
@@ -57,6 +60,16 @@ const odontogramSchema = z.object({
 
 const idParam = z.object({ patientId: z.string().uuid() });
 const recordKeyParam = z.object({ recordKey: z.string().uuid() });
+const documentParam = z.object({
+  patientId: z.string().uuid(),
+  documentId: z.string().uuid(),
+});
+const documentUploadSchema = z.object({
+  kind: z.string().min(1).max(80),
+  fileName: z.string().min(1).max(180),
+  contentType: z.string().min(1).max(100),
+  sizeBytes: z.number().int().positive(),
+});
 
 export interface RouteServices {
   readonly patients: PatientService;
@@ -65,6 +78,7 @@ export interface RouteServices {
   readonly anamnesis: AnamnesisService;
   readonly odontogram: OdontogramService;
   readonly rights: PatientRightsService;
+  readonly documents: DocumentService;
 }
 
 const validationError = { error: { code: "VALIDATION", message: "Dados invalidos." } };
@@ -74,6 +88,71 @@ export async function registerRoutes(
   services: RouteServices,
 ): Promise<void> {
   fastify.get("/health", async () => ({ status: "ok" }));
+
+  fastify.post(
+    "/patients/:patientId/documents/upload",
+    { preHandler: fastify.authenticate },
+    async (request, reply) => {
+      const params = idParam.safeParse(request.params);
+      const body = documentUploadSchema.safeParse(request.body);
+      if (!params.success || !body.success)
+        return reply.status(400).send(validationError);
+      try {
+        const result = await services.documents.createUpload(requireContext(request), {
+          patientId: params.data.patientId,
+          ...body.data,
+        });
+        return reply.status(201).send(result);
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
+
+  fastify.get(
+    "/patients/me",
+    { preHandler: fastify.authenticate },
+    async (request, reply) => {
+      try {
+        return reply.send(await services.patients.getOwnProfile(requireContext(request)));
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
+
+  fastify.get(
+    "/patients/me/clinical-records",
+    { preHandler: fastify.authenticate },
+    async (request, reply) => {
+      try {
+        const records = await services.records.listForSelf(requireContext(request));
+        return reply.send({ records });
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
+
+  fastify.get(
+    "/patients/:patientId/documents/:documentId/download",
+    { preHandler: fastify.authenticate },
+    async (request, reply) => {
+      const params = documentParam.safeParse(request.params);
+      if (!params.success) return reply.status(400).send(validationError);
+      try {
+        return reply.send(
+          await services.documents.createDownload(
+            requireContext(request),
+            params.data.patientId,
+            params.data.documentId,
+          ),
+        );
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
 
   // --- Pacientes ---
 
@@ -132,6 +211,27 @@ export async function registerRoutes(
           body.data,
         );
         return reply.send(patient);
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
+
+  fastify.put(
+    "/patients/:patientId/portal-user",
+    { preHandler: fastify.authenticate },
+    async (request, reply) => {
+      const params = idParam.safeParse(request.params);
+      const body = portalUserLinkSchema.safeParse(request.body);
+      if (!params.success || !body.success)
+        return reply.status(400).send(validationError);
+      try {
+        const patient = await services.patients.linkPortalUser(
+          requireContext(request),
+          params.data.patientId,
+          body.data.portalUserId,
+        );
+        return reply.send({ patientId: patient.id, portalUserId: patient.portalUserId });
       } catch (error) {
         return sendError(reply, error);
       }

@@ -151,6 +151,34 @@ export class ClinicalRecordService {
     return records;
   }
 
+  /**
+   * Lista somente o prontuario do paciente vinculado ao proprio usuario.
+   * Esta rota deliberadamente nao aceita patientId informado pelo cliente.
+   */
+  async listForSelf(actor: TenantContext): Promise<ClinicalRecord[]> {
+    this.deps.authorization.ensure(actor, "patient:self-read", actor.tenantId);
+    const patient = await this.deps.patients.findByPortalUserId(
+      actor.tenantId,
+      actor.userId,
+    );
+    if (!patient?.active) {
+      throw new NotFoundError("Cadastro de paciente nao vinculado.");
+    }
+    const records = await this.deps.records.listCurrentForPatient(
+      actor.tenantId,
+      patient.id,
+    );
+    await this.deps.audit.record({
+      tenantId: actor.tenantId,
+      actorUserId: actor.userId,
+      action: "clinical_record.self_accessed",
+      resourceType: "clinical_record",
+      resourceId: patient.id,
+      metadata: { count: records.length },
+    });
+    return records;
+  }
+
   /** Historico completo (todas as versoes) de uma entrada. Auditado. */
   async history(actor: TenantContext, recordKey: string): Promise<ClinicalRecord[]> {
     this.deps.authorization.ensure(actor, "patient:read", actor.tenantId);

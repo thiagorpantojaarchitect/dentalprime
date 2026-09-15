@@ -263,3 +263,13 @@ th {
   font-size: 14px;
   color: var(--muted);
 }
+
+.pagination {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+  color: var(--muted);
+  font-size: 14px;
+}

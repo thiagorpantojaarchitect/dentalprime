@@ -27,6 +27,9 @@ export const patients = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     tenantId: uuid("tenant_id").notNull(),
+    // Vinculo opt-in com identity-access. Nao ha FK entre schemas/servicos;
+    // a role patient e o tenant do JWT tambem sao validados no acesso proprio.
+    portalUserId: uuid("portal_user_id"),
     fullName: text("full_name").notNull(),
     // CPF armazenado apenas com digitos (normalizado). Sensivel.
     cpf: text("cpf").notNull(),
@@ -43,6 +46,7 @@ export const patients = pgTable(
   },
   (table) => [
     uniqueIndex("patient_tenant_cpf_idx").on(table.tenantId, table.cpf),
+    uniqueIndex("patient_tenant_portal_user_idx").on(table.tenantId, table.portalUserId),
     index("patient_tenant_idx").on(table.tenantId),
   ],
 );

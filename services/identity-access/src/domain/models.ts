@@ -50,6 +50,17 @@ export interface Session {
   readonly revokedAt: Date | null;
 }
 
+/** One-time account activation invitation. Only the token hash is persisted. */
+export interface Invitation {
+  readonly id: string;
+  readonly tenantId: TenantId;
+  readonly userId: UserId;
+  readonly tokenHash: string;
+  readonly expiresAt: Date;
+  readonly usedAt: Date | null;
+  readonly createdByUserId: UserId;
+}
+
 export interface AuditEntry {
   readonly tenantId: TenantId;
   readonly actorUserId: UserId | null;

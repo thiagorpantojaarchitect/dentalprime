@@ -26,7 +26,7 @@ import type { TriageResult } from "../domain/models.js";
 import type { AIProvider } from "./ai-provider.js";
 
 /** Limite explicito de tokens de saida. Sempre definido (nunca implicito). */
-const MAX_OUTPUT_TOKENS = 1024;
+const DEFAULT_MAX_OUTPUT_TOKENS = 1024;
 
 /** Regiao primaria do produto (dados no Brasil). */
 export const DEFAULT_BEDROCK_REGION = "sa-east-1";
@@ -69,6 +69,9 @@ export interface BedrockAIProviderOptions {
   readonly client: BedrockRuntimeClient;
   /** Id do modelo (ou inference profile) a usar no Converse. */
   readonly modelId: string;
+  readonly maxTokens?: number;
+  readonly guardrailId?: string;
+  readonly guardrailVersion?: string;
 }
 
 /** Cria um cliente Bedrock Runtime com retry adaptativo. */
@@ -151,10 +154,33 @@ function parseTriage(raw: string, originalText: string): TriageResult {
 export class BedrockAIProvider implements AIProvider {
   private readonly client: BedrockRuntimeClient;
   private readonly modelId: string;
+  private readonly maxTokens: number;
+  private readonly guardrailConfig:
+    | {
+        readonly guardrailIdentifier: string;
+        readonly guardrailVersion: string;
+        readonly trace: "disabled";
+      }
+    | undefined;
 
   constructor(options: BedrockAIProviderOptions) {
     this.client = options.client;
     this.modelId = options.modelId;
+    this.maxTokens = options.maxTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
+    if (!Number.isInteger(this.maxTokens) || this.maxTokens < 1) {
+      throw new Error("Bedrock maxTokens must be a positive integer.");
+    }
+    if (Boolean(options.guardrailId) !== Boolean(options.guardrailVersion)) {
+      throw new Error("Bedrock guardrail ID and version must be configured together.");
+    }
+    this.guardrailConfig =
+      options.guardrailId && options.guardrailVersion
+        ? {
+            guardrailIdentifier: options.guardrailId,
+            guardrailVersion: options.guardrailVersion,
+            trace: "disabled",
+          }
+        : undefined;
   }
 
   async reply(userMessage: string): Promise<string> {
@@ -166,7 +192,8 @@ export class BedrockAIProvider implements AIProvider {
         modelId: this.modelId,
         system: [{ text: RECEPTION_SYSTEM_PROMPT }],
         messages,
-        inferenceConfig: { maxTokens: MAX_OUTPUT_TOKENS, temperature: 0.3 },
+        inferenceConfig: { maxTokens: this.maxTokens, temperature: 0.3 },
+        guardrailConfig: this.guardrailConfig,
       }),
     );
     const text = extractText(output);
@@ -187,7 +214,8 @@ export class BedrockAIProvider implements AIProvider {
           modelId: this.modelId,
           system: [{ text: TRIAGE_SYSTEM_PROMPT }],
           messages: [{ role: "user", content: [{ text }] }],
-          inferenceConfig: { maxTokens: MAX_OUTPUT_TOKENS, temperature: 0 },
+          inferenceConfig: { maxTokens: this.maxTokens, temperature: 0 },
+          guardrailConfig: this.guardrailConfig,
         }),
       );
       const raw = extractText(output);

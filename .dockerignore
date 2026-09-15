@@ -11,9 +11,10 @@
 infrastructure/cdk.out
 **/cdk.out
 
-# Frontend (buildado/deployado separadamente)
-apps/clinic-web/dist
-apps/clinic-web/.vite
+# Frontends e apps (buildados/deployados separadamente)
+apps/*/dist
+apps/*/.vite
+apps/*/.expo
 
 # Segredos e ambiente (NUNCA na imagem)
 **/.env

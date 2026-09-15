@@ -28,9 +28,11 @@ import type {
 import type {
   AppointmentRepository,
   ProviderRepository,
+  ResourceRepository,
+  SchedulingUnitOfWork,
   StatusHistoryRepository,
 } from "../domain/repositories.js";
-import type { AuditService } from "./audit-service.js";
+import type { AvailabilityService } from "./availability-service.js";
 import { appointmentEvent, type EventPublisher } from "./event-publisher.js";
 
 export interface BookInput {
@@ -58,8 +60,10 @@ const ALLOWED_TRANSITIONS: Readonly<
 export interface SchedulingServiceDeps {
   readonly appointments: AppointmentRepository;
   readonly providers: ProviderRepository;
+  readonly resources: ResourceRepository;
+  readonly availability: AvailabilityService;
   readonly statusHistory: StatusHistoryRepository;
-  readonly audit: AuditService;
+  readonly unitOfWork: SchedulingUnitOfWork;
   readonly events: EventPublisher;
   readonly authorization: AuthorizationService;
 }
@@ -69,48 +73,68 @@ export class SchedulingService {
 
   /** Cria um agendamento verificando conflito. Requer appointment:manage. */
   async book(actor: TenantContext, input: BookInput): Promise<Appointment> {
-    this.deps.authorization.ensure(actor, "appointment:manage", actor.tenantId);
+    this.deps.authorization.ensureUnit(
+      actor,
+      "appointment:manage",
+      actor.tenantId,
+      input.unitId,
+    );
     this.validateInterval(input.startsAt, input.endsAt);
 
-    const provider = await this.deps.providers.findById(actor.tenantId, input.providerId);
-    if (!provider) {
-      throw new NotFoundError("Profissional nao encontrado.");
-    }
+    const resourceId = input.resourceId ?? null;
+    await this.assertReferences(
+      actor.tenantId,
+      input.unitId,
+      input.providerId,
+      resourceId,
+    );
+    await this.assertAvailable(
+      actor.tenantId,
+      input.unitId,
+      input.providerId,
+      resourceId,
+      input.startsAt,
+      input.endsAt,
+    );
 
     if (!input.allowOverbooking) {
       await this.assertNoConflict(
         actor.tenantId,
         input.providerId,
+        resourceId,
         input.startsAt,
         input.endsAt,
       );
     }
 
-    const appointment = await this.deps.appointments.create({
-      tenantId: actor.tenantId,
-      unitId: input.unitId,
-      patientId: input.patientId,
-      providerId: input.providerId,
-      resourceId: input.resourceId ?? null,
-      startsAt: input.startsAt,
-      endsAt: input.endsAt,
-      createdBy: actor.userId,
-    });
-
-    await this.deps.statusHistory.append({
-      tenantId: actor.tenantId,
-      appointmentId: appointment.id,
-      fromStatus: null,
-      toStatus: "booked",
-      changedBy: actor.userId,
-    });
-
-    await this.deps.audit.record({
-      tenantId: actor.tenantId,
-      actorUserId: actor.userId,
-      action: "appointment.booked",
-      resourceType: "appointment",
-      resourceId: appointment.id,
+    const appointment = await this.deps.unitOfWork.run(async (repositories) => {
+      const created = await repositories.appointments.create({
+        tenantId: actor.tenantId,
+        unitId: input.unitId,
+        patientId: input.patientId,
+        providerId: input.providerId,
+        resourceId,
+        startsAt: input.startsAt,
+        endsAt: input.endsAt,
+        allowOverbooking: input.allowOverbooking === true,
+        createdBy: actor.userId,
+      });
+      await repositories.statusHistory.append({
+        tenantId: actor.tenantId,
+        appointmentId: created.id,
+        fromStatus: null,
+        toStatus: "booked",
+        changedBy: actor.userId,
+      });
+      await repositories.audit.append({
+        tenantId: actor.tenantId,
+        actorUserId: actor.userId,
+        action: "appointment.booked",
+        resourceType: "appointment",
+        resourceId: created.id,
+        ipAddress: null,
+      });
+      return created;
     });
 
     await this.deps.events.publish(
@@ -140,34 +164,77 @@ export class SchedulingService {
     if (!current) {
       throw new NotFoundError("Agendamento nao encontrado.");
     }
+    this.deps.authorization.ensureUnit(
+      actor,
+      "appointment:manage",
+      actor.tenantId,
+      current.unitId,
+    );
     if (current.status === "cancelled" || current.status === "attended") {
       throw new ValidationError("Agendamento nao pode ser reagendado no status atual.");
     }
+
+    await this.assertReferences(
+      actor.tenantId,
+      current.unitId,
+      current.providerId,
+      current.resourceId,
+    );
+    await this.assertAvailable(
+      actor.tenantId,
+      current.unitId,
+      current.providerId,
+      current.resourceId,
+      startsAt,
+      endsAt,
+    );
 
     if (!allowOverbooking) {
       await this.assertNoConflict(
         actor.tenantId,
         current.providerId,
+        current.resourceId,
         startsAt,
         endsAt,
         appointmentId,
       );
     }
 
-    const updated = await this.deps.appointments.updateSchedule(
-      actor.tenantId,
-      appointmentId,
-      startsAt,
-      endsAt,
-    );
-
-    await this.deps.audit.record({
-      tenantId: actor.tenantId,
-      actorUserId: actor.userId,
-      action: "appointment.rescheduled",
-      resourceType: "appointment",
-      resourceId: appointmentId,
+    const updated = await this.deps.unitOfWork.run(async (repositories) => {
+      const latest = await repositories.appointments.findByIdForUpdate(
+        actor.tenantId,
+        appointmentId,
+      );
+      if (!latest) throw new NotFoundError("Agendamento nao encontrado.");
+      if (latest.status === "cancelled" || latest.status === "attended") {
+        throw new ValidationError("Agendamento nao pode ser reagendado no status atual.");
+      }
+      const rescheduled = await repositories.appointments.updateSchedule(
+        actor.tenantId,
+        appointmentId,
+        startsAt,
+        endsAt,
+        allowOverbooking,
+      );
+      await repositories.audit.append({
+        tenantId: actor.tenantId,
+        actorUserId: actor.userId,
+        action: "appointment.rescheduled",
+        resourceType: "appointment",
+        resourceId: appointmentId,
+        ipAddress: null,
+      });
+      return rescheduled;
     });
+
+    await this.deps.events.publish(
+      appointmentEvent("AppointmentRescheduled", actor.tenantId, {
+        appointmentId: updated.id,
+        patientId: updated.patientId,
+        providerId: updated.providerId,
+        startsAt: updated.startsAt.toISOString(),
+      }),
+    );
 
     return updated;
   }
@@ -183,38 +250,47 @@ export class SchedulingService {
   ): Promise<Appointment> {
     this.deps.authorization.ensure(actor, "appointment:manage", actor.tenantId);
 
-    const current = await this.deps.appointments.findById(actor.tenantId, appointmentId);
-    if (!current) {
-      throw new NotFoundError("Agendamento nao encontrado.");
-    }
-
-    const allowed = ALLOWED_TRANSITIONS[current.status];
-    if (!allowed.includes(toStatus)) {
-      throw new ValidationError(
-        `Transicao de status invalida: ${current.status} -> ${toStatus}.`,
+    const updated = await this.deps.unitOfWork.run(async (repositories) => {
+      const current = await repositories.appointments.findByIdForUpdate(
+        actor.tenantId,
+        appointmentId,
       );
-    }
+      if (!current) throw new NotFoundError("Agendamento nao encontrado.");
+      this.deps.authorization.ensureUnit(
+        actor,
+        "appointment:manage",
+        actor.tenantId,
+        current.unitId,
+      );
 
-    const updated = await this.deps.appointments.updateStatus(
-      actor.tenantId,
-      appointmentId,
-      toStatus,
-    );
+      const allowed = ALLOWED_TRANSITIONS[current.status];
+      if (!allowed.includes(toStatus)) {
+        throw new ValidationError(
+          `Transicao de status invalida: ${current.status} -> ${toStatus}.`,
+        );
+      }
 
-    await this.deps.statusHistory.append({
-      tenantId: actor.tenantId,
-      appointmentId,
-      fromStatus: current.status,
-      toStatus,
-      changedBy: actor.userId,
-    });
-
-    await this.deps.audit.record({
-      tenantId: actor.tenantId,
-      actorUserId: actor.userId,
-      action: `appointment.status.${toStatus}`,
-      resourceType: "appointment",
-      resourceId: appointmentId,
+      const changed = await repositories.appointments.updateStatus(
+        actor.tenantId,
+        appointmentId,
+        toStatus,
+      );
+      await repositories.statusHistory.append({
+        tenantId: actor.tenantId,
+        appointmentId,
+        fromStatus: current.status,
+        toStatus,
+        changedBy: actor.userId,
+      });
+      await repositories.audit.append({
+        tenantId: actor.tenantId,
+        actorUserId: actor.userId,
+        action: `appointment.status.${toStatus}`,
+        resourceType: "appointment",
+        resourceId: appointmentId,
+        ipAddress: null,
+      });
+      return changed;
     });
 
     await this.publishStatusEvent(actor.tenantId, updated, toStatus);
@@ -235,6 +311,17 @@ export class SchedulingService {
     }>
   > {
     this.deps.authorization.ensure(actor, "appointment:read", actor.tenantId);
+    const appointment = await this.deps.appointments.findById(
+      actor.tenantId,
+      appointmentId,
+    );
+    if (!appointment) throw new NotFoundError("Agendamento nao encontrado.");
+    this.deps.authorization.ensureUnit(
+      actor,
+      "appointment:read",
+      actor.tenantId,
+      appointment.unitId,
+    );
     return this.deps.statusHistory.listForAppointment(actor.tenantId, appointmentId);
   }
 
@@ -247,21 +334,75 @@ export class SchedulingService {
   private async assertNoConflict(
     tenantId: string,
     providerId: ProviderId,
+    resourceId: ResourceId | null,
     startsAt: Date,
     endsAt: Date,
     excludeAppointmentId?: AppointmentId,
   ): Promise<void> {
-    const conflicts = await this.deps.appointments.listActiveForProviderInRange(
-      tenantId,
-      providerId,
-      startsAt,
-      endsAt,
-    );
-    const real = conflicts.filter((c) => c.id !== excludeAppointmentId);
-    if (real.length > 0) {
+    const [providerConflicts, resourceConflicts] = await Promise.all([
+      this.deps.appointments.listActiveForProviderInRange(
+        tenantId,
+        providerId,
+        startsAt,
+        endsAt,
+      ),
+      resourceId
+        ? this.deps.appointments.listActiveForResourceInRange(
+            tenantId,
+            resourceId,
+            startsAt,
+            endsAt,
+          )
+        : Promise.resolve([]),
+    ]);
+    if (providerConflicts.some((conflict) => conflict.id !== excludeAppointmentId)) {
       throw new ScheduleConflictError(
         "Ja existe um agendamento para este profissional no horario.",
       );
+    }
+    if (resourceConflicts.some((conflict) => conflict.id !== excludeAppointmentId)) {
+      throw new ScheduleConflictError(
+        "Ja existe um agendamento para este recurso no horario.",
+      );
+    }
+  }
+
+  private async assertReferences(
+    tenantId: string,
+    unitId: ClinicUnitId,
+    providerId: ProviderId,
+    resourceId: ResourceId | null,
+  ): Promise<void> {
+    const [provider, resource] = await Promise.all([
+      this.deps.providers.findById(tenantId, providerId),
+      resourceId ? this.deps.resources.findById(tenantId, resourceId) : null,
+    ]);
+    if (!provider || provider.unitId !== unitId) {
+      throw new NotFoundError("Profissional nao encontrado nesta unidade.");
+    }
+    if (resourceId && (!resource || resource.unitId !== unitId)) {
+      throw new NotFoundError("Recurso nao encontrado nesta unidade.");
+    }
+  }
+
+  private async assertAvailable(
+    tenantId: string,
+    unitId: ClinicUnitId,
+    providerId: ProviderId,
+    resourceId: ResourceId | null,
+    startsAt: Date,
+    endsAt: Date,
+  ): Promise<void> {
+    const available = await this.deps.availability.isWithinAvailability(
+      tenantId,
+      unitId,
+      providerId,
+      resourceId,
+      startsAt,
+      endsAt,
+    );
+    if (!available) {
+      throw new ScheduleConflictError("Horario fora da disponibilidade.");
     }
   }
 

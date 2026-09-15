@@ -13,6 +13,7 @@ export interface TokenPair {
 
 export interface Patient {
   readonly id: string;
+  readonly portalUserId?: string | null;
   readonly fullName: string;
   readonly cpf: string;
   readonly birthDate?: string | null;

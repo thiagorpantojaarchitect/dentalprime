@@ -1,17 +1,20 @@
 /**
- * ComputeStack: os servicos de backend em ECS Fargate.
+ * ComputeStack: sete servicos de dominio em ECS Fargate.
  *
- * Um cluster Fargate roda os sete servicos de dominio, cada um em sua task
- * definition, atras de um Application Load Balancer com roteamento por path.
- * Configuracao vem de variaveis de ambiente; segredos (DATABASE_URL, JWT_SECRET)
- * sao injetados do Secrets Manager em runtime. Cada servico usa o SG de clientes
- * de dados para acessar banco/cache com privilegio minimo.
- *
- * A imagem de cada servico vem de um repositorio ECR proprio; a tag e
- * parametrizada (por commit/ambiente) e publicada pelo pipeline de CI/CD.
+ * Os repositorios ECR chegam do RegistryStack, portanto ja existem antes do
+ * build. O pipeline primeiro implanta este stack com desiredCount=0, executa a
+ * revisao exata das migrations e somente depois ativa os servicos.
  */
 
-import { CfnOutput, Duration, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
+import {
+  CfnOutput,
+  Duration,
+  RemovalPolicy,
+  SecretValue,
+  Stack,
+  Validations,
+  type StackProps,
+} from "aws-cdk-lib";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as ecr from "aws-cdk-lib/aws-ecr";
 import * as ecs from "aws-cdk-lib/aws-ecs";
@@ -19,67 +22,87 @@ import * as elbv2 from "aws-cdk-lib/aws-elasticloadbalancingv2";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as kms from "aws-cdk-lib/aws-kms";
 import * as logs from "aws-cdk-lib/aws-logs";
+import * as s3 from "aws-cdk-lib/aws-s3";
 import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager";
 import type { Construct } from "constructs";
 
 import type { EnvironmentConfig } from "./config/environments.js";
 import { BACKEND_SERVICES, DATABASE_NAME, RESOURCE_PREFIX } from "./constants.js";
 
+export type AiProvider = "stub" | "bedrock";
+
 export interface ComputeStackProps extends StackProps {
   readonly envConfig: EnvironmentConfig;
   readonly vpc: ec2.IVpc;
-  /** ARN da chave KMS de logs (importada por ARN para evitar ciclo de stacks). */
+  readonly repositories: Readonly<Record<string, ecr.IRepository>>;
   readonly logsKeyArn: string;
-  /** SG do banco (o ComputeStack adiciona ingress a partir do SG dos servicos). */
   readonly databaseSecurityGroup: ec2.ISecurityGroup;
-  /** SG do Redis (o ComputeStack adiciona ingress a partir do SG dos servicos). */
   readonly redisSecurityGroup: ec2.ISecurityGroup;
-  /**
-   * ARN do segredo de credenciais do banco. Passado como ARN (nao como
-   * construct) para que os grants sejam por politica de identidade dentro deste
-   * stack, evitando mutar o SecurityStack e criar ciclo de dependencia.
-   */
   readonly dbCredentialsArn: string;
-  /** Endpoint do writer do Aurora. */
   readonly databaseEndpoint: string;
-  /** ARN do segredo JWT compartilhado. */
+  readonly redisEndpoint: string;
+  readonly redisAuthTokenArn: string;
   readonly jwtSecretArn: string;
-  /** ARN da chave KMS que cifra os segredos (para conceder decrypt as tasks). */
   readonly dataKeyArn: string;
-  /**
-   * Tag da imagem de container a implantar (ex.: commit SHA). Publicada pelo
-   * pipeline no ECR. Padrao "latest" apenas para sintese local.
-   */
+  readonly eventBusName: string;
+  readonly eventBusArn: string;
+  readonly clinicalDocumentsBucketName: string;
+  readonly clinicalDocumentsBucketArn: string;
+  readonly cloudFrontOriginTokenSecretName: string;
+  readonly developmentBootstrapCredentialsArn?: string;
   readonly imageTag?: string;
+  /** Zero na fase prepare-runtime; omitido para usar o valor do ambiente. */
+  readonly desiredCountOverride?: number;
+  readonly aiProvider?: AiProvider;
+  readonly bedrockModelId?: string;
+  readonly bedrockGuardrailId?: string;
+  readonly bedrockGuardrailVersion?: string;
 }
 
 export class ComputeStack extends Stack {
   public readonly cluster: ecs.Cluster;
   public readonly loadBalancer: elbv2.ApplicationLoadBalancer;
-  /** Repositorios ECR por servico (a imagem e publicada pelo pipeline). */
-  public readonly repositories: Record<string, ecr.Repository> = {};
-  /** Task definitions de migracao por servico (executadas como RunTask). */
-  public readonly migrationTaskDefinitions: Record<string, ecs.FargateTaskDefinition> =
-    {};
+  public readonly migrationTaskDefinitions: Readonly<
+    Record<string, ecs.FargateTaskDefinition>
+  >;
+  public readonly services: Readonly<Record<string, ecs.FargateService>>;
+  public readonly targetGroups: Readonly<Record<string, elbv2.ApplicationTargetGroup>>;
 
   constructor(scope: Construct, id: string, props: ComputeStackProps) {
     super(scope, id, props);
     const {
       envConfig,
       vpc,
+      repositories,
       logsKeyArn,
       databaseSecurityGroup,
       redisSecurityGroup,
       dbCredentialsArn,
       databaseEndpoint,
+      redisEndpoint,
+      redisAuthTokenArn,
       jwtSecretArn,
       dataKeyArn,
+      eventBusName,
+      eventBusArn,
+      clinicalDocumentsBucketName,
+      clinicalDocumentsBucketArn,
+      cloudFrontOriginTokenSecretName,
+      developmentBootstrapCredentialsArn,
       imageTag = "latest",
+      desiredCountOverride,
+      aiProvider = "stub",
+      bedrockModelId,
+      bedrockGuardrailId,
+      bedrockGuardrailVersion,
     } = props;
     const suffix = envConfig.name;
+    const desiredCount = desiredCountOverride ?? envConfig.desiredCount;
 
-    // Segredos importados por ARN neste stack: grants tornam-se politicas de
-    // identidade locais (sem mutar o SecurityStack).
+    if (aiProvider === "bedrock" && !bedrockModelId) {
+      throw new Error("bedrockModelId e obrigatorio quando aiProvider=bedrock");
+    }
+
     const dbCredentials = secretsmanager.Secret.fromSecretCompleteArn(
       this,
       "DbCredentialsRef",
@@ -90,9 +113,22 @@ export class ComputeStack extends Stack {
       "JwtSecretRef",
       jwtSecretArn,
     );
-    // Chave de logs importada por ARN: o CDK nao muta a policy de uma chave
-    // externa, evitando dependencia SecurityStack -> ComputeStack.
+    const redisAuthToken = secretsmanager.Secret.fromSecretCompleteArn(
+      this,
+      "RedisAuthTokenRef",
+      redisAuthTokenArn,
+    );
+    const developmentBootstrapCredentials = developmentBootstrapCredentialsArn
+      ? secretsmanager.Secret.fromSecretCompleteArn(
+          this,
+          "DevelopmentBootstrapCredentialsRef",
+          developmentBootstrapCredentialsArn,
+        )
+      : undefined;
     const logsKey = kms.Key.fromKeyArn(this, "LogsKeyRef", logsKeyArn);
+    const originToken = SecretValue.secretsManager(
+      cloudFrontOriginTokenSecretName,
+    ).unsafeUnwrap();
 
     this.cluster = new ecs.Cluster(this, "Cluster", {
       clusterName: `${RESOURCE_PREFIX}-cluster-${suffix}`,
@@ -100,13 +136,25 @@ export class ComputeStack extends Stack {
       containerInsightsV2: ecs.ContainerInsights.ENABLED,
     });
 
-    // ALB publico (a borda real fica atras de CloudFront/WAF no EdgeStack).
     this.loadBalancer = new elbv2.ApplicationLoadBalancer(this, "Alb", {
       loadBalancerName: `${RESOURCE_PREFIX}-alb-${suffix}`,
       vpc,
       internetFacing: true,
+      deletionProtection: envConfig.removalProtection,
+      dropInvalidHeaderFields: true,
     });
 
+    const accessLogsBucket = new s3.Bucket(this, "LoadBalancerAccessLogs", {
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
+      removalPolicy: envConfig.removalPolicy,
+      autoDeleteObjects: envConfig.removalPolicy === RemovalPolicy.DESTROY,
+    });
+    this.loadBalancer.logAccessLogs(accessLogsBucket, "alb");
+
+    // O listener e publico para ser uma origem CloudFront, mas nenhuma rota util
+    // casa sem o header secreto injetado somente pela distribuicao.
     const listener = this.loadBalancer.addListener("HttpListener", {
       port: 80,
       open: true,
@@ -116,16 +164,20 @@ export class ComputeStack extends Stack {
       }),
     });
 
-    // SG comum das tasks (criado neste stack). Autoriza egress e recebe acesso
-    // a banco/cache adicionando ingress nos SGs de dados (compute -> data,
-    // aciclico).
     const serviceSecurityGroup = new ec2.SecurityGroup(this, "ServiceSg", {
       vpc,
       description: "Tasks ECS dos servicos de backend",
       allowAllOutbound: true,
     });
-    // Regras de ingress criadas neste stack (compute -> data) para manter o
-    // grafo aciclico: um CfnSecurityGroupIngress referencia os SGs por id.
+    const redisClientSecurityGroup = new ec2.SecurityGroup(
+      this,
+      "IdentityRedisClientSg",
+      {
+        vpc,
+        description: "Acesso Redis exclusivo do identity-access",
+        allowAllOutbound: true,
+      },
+    );
     new ec2.CfnSecurityGroupIngress(this, "DbIngressFromServices", {
       groupId: databaseSecurityGroup.securityGroupId,
       ipProtocol: "tcp",
@@ -139,13 +191,21 @@ export class ComputeStack extends Stack {
       ipProtocol: "tcp",
       fromPort: 6379,
       toPort: 6379,
-      sourceSecurityGroupId: serviceSecurityGroup.securityGroupId,
-      description: "Redis a partir das tasks de backend",
+      sourceSecurityGroupId: redisClientSecurityGroup.securityGroupId,
+      description: "Redis somente a partir do identity-access",
     });
-    const serviceSecurityGroups = [serviceSecurityGroup];
 
+    const migrationTaskDefinitions: Record<string, ecs.FargateTaskDefinition> = {};
+    const services: Record<string, ecs.FargateService> = {};
+    const targetGroups: Record<string, elbv2.ApplicationTargetGroup> = {};
     let priority = 10;
+
     for (const service of BACKEND_SERVICES) {
+      const repository = repositories[service.name];
+      if (!repository) {
+        throw new Error(`Repositorio ECR ausente para ${service.name}`);
+      }
+
       const logGroup = new logs.LogGroup(this, `${service.name}-Logs`, {
         logGroupName: `/${RESOURCE_PREFIX}/${suffix}/${service.name}`,
         retention: envConfig.logRetention,
@@ -153,56 +213,144 @@ export class ComputeStack extends Stack {
         removalPolicy: envConfig.removalPolicy,
       });
 
-      // Repositorio ECR do servico: scan on push e limpeza de imagens antigas.
-      const repository = new ecr.Repository(this, `${service.name}-Repo`, {
-        repositoryName: `${RESOURCE_PREFIX}/${service.name}`,
-        imageScanOnPush: true,
-        imageTagMutability: ecr.TagMutability.IMMUTABLE,
-        encryption: ecr.RepositoryEncryption.KMS,
-        removalPolicy: envConfig.removalPolicy,
-        emptyOnDelete: envConfig.removalPolicy === RemovalPolicy.DESTROY,
-        lifecycleRules: [{ maxImageCount: 20 }],
-      });
-      this.repositories[service.name] = repository;
-
+      const runtimePlatform: ecs.RuntimePlatform = {
+        cpuArchitecture: ecs.CpuArchitecture.X86_64,
+        operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
+      };
       const taskDefinition = new ecs.FargateTaskDefinition(this, `${service.name}-Task`, {
         family: `${RESOURCE_PREFIX}-${service.name}-${suffix}`,
         cpu: 256,
         memoryLimitMiB: 512,
+        runtimePlatform,
       });
 
-      // Decifrar os segredos exige kms:Decrypt na chave de dados. Concedido por
-      // politica de identidade (task + execution role), com a chave referenciada
-      // por ARN para nao mutar o SecurityStack. A leitura dos segredos e
-      // concedida pelo ecs.Secret abaixo (tambem por politica de identidade,
-      // pois os segredos foram importados por ARN neste stack).
-      const kmsDecrypt = new iam.PolicyStatement({
-        actions: ["kms:Decrypt"],
-        resources: [dataKeyArn],
-      });
-      taskDefinition.taskRole.addToPrincipalPolicy(kmsDecrypt);
-      taskDefinition.addToExecutionRolePolicy(kmsDecrypt);
+      taskDefinition.addToExecutionRolePolicy(
+        new iam.PolicyStatement({ actions: ["kms:Decrypt"], resources: [dataKeyArn] }),
+      );
 
-      // Imagem e configuracao compartilhadas entre o servico e a task de
-      // migracao (mesma imagem; a task de migracao troca RUN_MODE).
       const image = ecs.ContainerImage.fromEcrRepository(repository, imageTag);
       const baseEnvironment: Record<string, string> = {
         NODE_ENV: "production",
+        DEPLOYMENT_ENV: envConfig.name,
         PORT: String(service.port),
-        // Host/porta/banco nao sao segredos; usuario e senha vem do secret.
         DATABASE_HOST: databaseEndpoint,
         DATABASE_PORT: "5432",
         DATABASE_NAME,
-        // Tracing OTLP para o sidecar ADOT (collector local na task).
+        DATABASE_SCHEMA: service.databaseSchema,
+        DATABASE_SSLMODE: "verify-full",
         OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4318",
         OTEL_SERVICE_NAME: service.name,
+        OTEL_PROPAGATORS: "xray,tracecontext",
+        // Cadeia publica esperada: cliente -> CloudFront -> ALB -> Fastify.
+        // Um hop-count exato impede que X-Forwarded-For arbitrario seja aceito.
+        TRUST_PROXY: "2",
       };
       const baseSecrets: Record<string, ecs.Secret> = {
-        // Injetados do Secrets Manager em runtime; nunca em texto plano.
         DATABASE_USERNAME: ecs.Secret.fromSecretsManager(dbCredentials, "username"),
         DATABASE_PASSWORD: ecs.Secret.fromSecretsManager(dbCredentials, "password"),
         JWT_SECRET: ecs.Secret.fromSecretsManager(jwtSecret),
       };
+
+      const publishesEvents = ["smart-scheduling", "treatment-plan", "finance"].includes(
+        service.name,
+      );
+      if (publishesEvents) {
+        baseEnvironment.EVENT_PROVIDER = "eventbridge";
+        baseEnvironment.EVENT_BUS_NAME = eventBusName;
+        baseEnvironment.AWS_REGION = envConfig.region;
+        taskDefinition.taskRole.addToPrincipalPolicy(
+          new iam.PolicyStatement({
+            actions: ["events:PutEvents"],
+            resources: [eventBusArn],
+          }),
+        );
+      }
+
+      if (service.name === "identity-access") {
+        baseEnvironment.REDIS_HOST = redisEndpoint;
+        baseEnvironment.REDIS_PORT = "6379";
+        baseEnvironment.REDIS_TLS_ENABLED = "true";
+        baseEnvironment.REDIS_URL = `rediss://${redisEndpoint}:6379`;
+        baseEnvironment.INVITATION_TTL_SECONDS = envConfig.isProduction
+          ? "86400"
+          : "604800";
+        baseSecrets.REDIS_AUTH_TOKEN = ecs.Secret.fromSecretsManager(redisAuthToken);
+      }
+
+      if (service.name === "patient-record") {
+        baseEnvironment.CLINICAL_DOCUMENTS_BUCKET = clinicalDocumentsBucketName;
+        baseEnvironment.CLINICAL_DOCUMENT_MAX_BYTES = "26214400";
+        baseEnvironment.PRESIGNED_URL_TTL_SECONDS = "900";
+        baseEnvironment.AWS_REGION = envConfig.region;
+        taskDefinition.taskRole.addToPrincipalPolicy(
+          new iam.PolicyStatement({
+            actions: ["s3:ListBucket"],
+            resources: [clinicalDocumentsBucketArn],
+            conditions: { StringLike: { "s3:prefix": ["tenants/*"] } },
+          }),
+        );
+        taskDefinition.taskRole.addToPrincipalPolicy(
+          new iam.PolicyStatement({
+            actions: ["s3:GetObject", "s3:PutObject"],
+            resources: [`${clinicalDocumentsBucketArn}/tenants/*`],
+          }),
+        );
+        // Validations.acknowledge reserva "::" como delimitador e nao aceita o
+        // ARN S3 granular. Registramos a mesma metadata diretamente no construct
+        // exclusivo da role do patient-record.
+        taskDefinition.taskRole.node.addMetadata(
+          Validations.ACKNOWLEDGED_RULES_METADATA_KEY,
+          {
+            [`AwsSolutions-IAM5[Resource::${clinicalDocumentsBucketArn}/tenants/*]`]:
+              "Objetos clinicos usam chaves dinamicas sob tenants/<tenant-id>/; o wildcard e limitado a esse prefixo e somente a role do patient-record possui acesso.",
+          },
+        );
+        taskDefinition.taskRole.addToPrincipalPolicy(
+          new iam.PolicyStatement({
+            actions: ["kms:Encrypt", "kms:Decrypt", "kms:GenerateDataKey"],
+            resources: [dataKeyArn],
+          }),
+        );
+      }
+
+      if (service.name === "ai-front-desk") {
+        baseEnvironment.AI_PROVIDER = aiProvider;
+        baseEnvironment.BEDROCK_REGION = envConfig.region;
+        baseEnvironment.BEDROCK_MAX_TOKENS = "1024";
+        if (aiProvider === "bedrock" && bedrockModelId) {
+          baseEnvironment.BEDROCK_MODEL_ID = bedrockModelId;
+          const modelResource = bedrockModelId.startsWith("arn:")
+            ? bedrockModelId
+            : this.formatArn({
+                service: "bedrock",
+                account: "",
+                resource: "foundation-model",
+                resourceName: bedrockModelId,
+              });
+          taskDefinition.taskRole.addToPrincipalPolicy(
+            new iam.PolicyStatement({
+              actions: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+              resources: [modelResource],
+            }),
+          );
+        }
+        if (bedrockGuardrailId && bedrockGuardrailVersion) {
+          baseEnvironment.BEDROCK_GUARDRAIL_ID = bedrockGuardrailId;
+          baseEnvironment.BEDROCK_GUARDRAIL_VERSION = bedrockGuardrailVersion;
+          taskDefinition.taskRole.addToPrincipalPolicy(
+            new iam.PolicyStatement({
+              actions: ["bedrock:ApplyGuardrail"],
+              resources: [
+                this.formatArn({
+                  service: "bedrock",
+                  resource: "guardrail",
+                  resourceName: bedrockGuardrailId,
+                }),
+              ],
+            }),
+          );
+        }
+      }
 
       const container = taskDefinition.addContainer("app", {
         image,
@@ -210,27 +358,35 @@ export class ComputeStack extends Stack {
         logging: ecs.LogDrivers.awsLogs({ streamPrefix: service.name, logGroup }),
         environment: baseEnvironment,
         secrets: baseSecrets,
+        readonlyRootFilesystem: true,
+        stopTimeout: Duration.seconds(30),
+        healthCheck: {
+          command: [
+            "CMD-SHELL",
+            `wget --no-verbose --tries=1 --spider http://127.0.0.1:${service.port}/ready || exit 1`,
+          ],
+          interval: Duration.seconds(30),
+          timeout: Duration.seconds(5),
+          retries: 3,
+          startPeriod: Duration.seconds(20),
+        },
       });
       container.addPortMappings({ containerPort: service.port });
 
-      // Sidecar ADOT (AWS Distro for OpenTelemetry): recebe OTLP do app em
-      // localhost e exporta traces para o X-Ray e metricas para o CloudWatch.
       taskDefinition.addContainer("adot", {
         image: ecs.ContainerImage.fromRegistry(
-          "public.ecr.aws/aws-observability/aws-otel-collector:latest",
+          "public.ecr.aws/aws-observability/aws-otel-collector@sha256:bb72328152c72fb9662056759b275f7cc85e115db12bbb114fbea9f68dc4816c",
         ),
         containerName: "adot-collector",
         command: ["--config=/etc/ecs/ecs-default-config.yaml"],
         essential: false,
+        readonlyRootFilesystem: true,
+        stopTimeout: Duration.seconds(30),
         logging: ecs.LogDrivers.awsLogs({
           streamPrefix: `${service.name}-adot`,
           logGroup,
         }),
       });
-      // O collector publica traces no X-Ray e metricas no CloudWatch. Em vez de
-      // politicas gerenciadas amplas, concedemos as acoes minimas necessarias.
-      // Essas acoes nao suportam escopo por recurso (exigencia da API), entao
-      // usam Resource '*' (reconhecido em nag-acknowledgements como IAM5).
       taskDefinition.taskRole.addToPrincipalPolicy(
         new iam.PolicyStatement({
           actions: [
@@ -245,8 +401,6 @@ export class ComputeStack extends Stack {
         }),
       );
 
-      // Task de migracao (one-off): mesma imagem, RUN_MODE=migrate. Executada
-      // como RunTask antes de rotar as tasks do servico (ver deployment.md).
       const migrationTask = new ecs.FargateTaskDefinition(
         this,
         `${service.name}-MigrationTask`,
@@ -254,10 +408,31 @@ export class ComputeStack extends Stack {
           family: `${RESOURCE_PREFIX}-${service.name}-migrate-${suffix}`,
           cpu: 256,
           memoryLimitMiB: 512,
+          runtimePlatform,
         },
       );
-      migrationTask.taskRole.addToPrincipalPolicy(kmsDecrypt);
-      migrationTask.addToExecutionRolePolicy(kmsDecrypt);
+      migrationTask.addToExecutionRolePolicy(
+        new iam.PolicyStatement({ actions: ["kms:Decrypt"], resources: [dataKeyArn] }),
+      );
+      const migrationSecrets = { ...baseSecrets };
+      if (service.name === "identity-access" && developmentBootstrapCredentials) {
+        migrationSecrets.BOOTSTRAP_TENANT_NAME = ecs.Secret.fromSecretsManager(
+          developmentBootstrapCredentials,
+          "tenantName",
+        );
+        migrationSecrets.BOOTSTRAP_ADMIN_EMAIL = ecs.Secret.fromSecretsManager(
+          developmentBootstrapCredentials,
+          "adminEmail",
+        );
+        migrationSecrets.BOOTSTRAP_ADMIN_NAME = ecs.Secret.fromSecretsManager(
+          developmentBootstrapCredentials,
+          "adminName",
+        );
+        migrationSecrets.BOOTSTRAP_ADMIN_PASSWORD = ecs.Secret.fromSecretsManager(
+          developmentBootstrapCredentials,
+          "adminPassword",
+        );
+      }
       migrationTask.addContainer("migrate", {
         image,
         containerName: `${service.name}-migrate`,
@@ -266,39 +441,79 @@ export class ComputeStack extends Stack {
           logGroup,
         }),
         environment: { ...baseEnvironment, RUN_MODE: "migrate" },
-        secrets: baseSecrets,
+        secrets: migrationSecrets,
+        readonlyRootFilesystem: true,
+        stopTimeout: Duration.seconds(30),
       });
-      this.migrationTaskDefinitions[service.name] = migrationTask;
+      migrationTaskDefinitions[service.name] = migrationTask;
 
       const fargateService = new ecs.FargateService(this, `${service.name}-Service`, {
         serviceName: `${RESOURCE_PREFIX}-${service.name}-${suffix}`,
         cluster: this.cluster,
         taskDefinition,
-        desiredCount: envConfig.desiredCount,
-        securityGroups: serviceSecurityGroups,
+        desiredCount,
+        securityGroups:
+          service.name === "identity-access"
+            ? [serviceSecurityGroup, redisClientSecurityGroup]
+            : [serviceSecurityGroup],
         vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
         circuitBreaker: { rollback: true },
-        // Mantem capacidade durante deploys (evita cair abaixo do desejado).
         minHealthyPercent: envConfig.isProduction ? 100 : 50,
         maxHealthyPercent: 200,
+        healthCheckGracePeriod: Duration.seconds(60),
       });
+      services[service.name] = fargateService;
 
-      listener.addTargets(`${service.name}-Target`, {
-        priority: priority++,
-        conditions: [elbv2.ListenerCondition.pathPatterns([`${service.pathPrefix}/*`])],
-        port: service.port,
-        protocol: elbv2.ApplicationProtocol.HTTP,
-        targets: [fargateService],
-        healthCheck: {
-          path: "/health",
-          interval: Duration.seconds(30),
-          healthyThresholdCount: 2,
-          unhealthyThresholdCount: 3,
+      const targetGroup = new elbv2.ApplicationTargetGroup(
+        this,
+        `${service.name}-TargetGroup`,
+        {
+          vpc,
+          port: service.port,
+          protocol: elbv2.ApplicationProtocol.HTTP,
+          targetType: elbv2.TargetType.IP,
+          targets: [fargateService],
+          healthCheck: {
+            path: "/ready",
+            interval: Duration.seconds(30),
+            healthyHttpCodes: "200-399",
+            healthyThresholdCount: 2,
+            unhealthyThresholdCount: 3,
+          },
+          deregistrationDelay: Duration.seconds(30),
         },
-        deregistrationDelay: Duration.seconds(30),
-      });
+      );
+      targetGroups[service.name] = targetGroup;
 
-      // Autoscaling por CPU em producao.
+      const rule = new elbv2.ApplicationListenerRule(this, `${service.name}-Rule`, {
+        listener,
+        priority: priority++,
+        conditions: [
+          elbv2.ListenerCondition.pathPatterns([
+            service.apiPathPrefix,
+            `${service.apiPathPrefix}/*`,
+          ]),
+          elbv2.ListenerCondition.httpHeader("x-dentalprime-origin", [originToken]),
+        ],
+        action: elbv2.ListenerAction.forward([targetGroup]),
+      });
+      const cfnRule = rule.node.defaultChild as elbv2.CfnListenerRule;
+      // O ALB casa /api/<dominio> antes do transform e entrega a rota nativa
+      // (/health, /ready, /patients, /appointments...) para o Fastify.
+      cfnRule.transforms = [
+        {
+          type: "url-rewrite",
+          urlRewriteConfig: {
+            rewrites: [
+              {
+                regex: `^${service.apiPathPrefix}/?(.*)$`,
+                replace: "/$1",
+              },
+            ],
+          },
+        },
+      ];
+
       if (envConfig.isProduction) {
         const scaling = fargateService.autoScaleTaskCount({
           minCapacity: envConfig.minCapacity,
@@ -312,14 +527,17 @@ export class ComputeStack extends Stack {
       }
     }
 
-    // Saidas usadas pelo workflow de deploy (run-task de migracao).
+    this.migrationTaskDefinitions = migrationTaskDefinitions;
+    this.services = services;
+    this.targetGroups = targetGroups;
+
     new CfnOutput(this, "ClusterName", {
       value: this.cluster.clusterName,
       description: "Nome do cluster ECS",
     });
     new CfnOutput(this, "ServiceSecurityGroupId", {
       value: serviceSecurityGroup.securityGroupId,
-      description: "SG das tasks de backend (usar no run-task de migracao)",
+      description: "SG usado pelo RunTask de migracao",
     });
   }
 }

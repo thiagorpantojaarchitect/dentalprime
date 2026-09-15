@@ -29,7 +29,13 @@ describe("TenantsPage", () => {
     render(
       sequencedFetch([
         jsonResponse(200, { tenants: [] }), // load inicial
-        jsonResponse(201, { id: "t2", name: "Clinica Nova", ownerUserId: "o1" }), // provision
+        jsonResponse(201, {
+          id: "t2",
+          name: "Clinica Nova",
+          ownerUserId: "o1",
+          ownerActivationToken: "b".repeat(32),
+          ownerActivationExpiresAt: "2026-09-18T12:00:00.000Z",
+        }), // provision
         jsonResponse(200, {
           tenants: [{ id: "t2", name: "Clinica Nova", active: true }],
         }), // reload
@@ -49,6 +55,9 @@ describe("TenantsPage", () => {
           'Tenant "Clinica Nova" provisionado. Owner pendente de ativação.',
         ),
       ).toBeInTheDocument(),
+    );
+    expect(screen.getByLabelText("Token do owner (exibido uma única vez)")).toHaveValue(
+      "b".repeat(32),
     );
   });
 

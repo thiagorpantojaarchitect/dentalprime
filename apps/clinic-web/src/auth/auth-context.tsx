@@ -24,6 +24,7 @@ export interface AuthContextValue {
   readonly session: Session | null;
   readonly isAuthenticated: boolean;
   login(tenantId: string, email: string, password: string): Promise<void>;
+  activate(tenantId: string, activationToken: string, password: string): Promise<void>;
   logout(): Promise<void>;
   /** Cria um ApiClient para um servico, ligado a sessao atual. */
   clientFor(baseUrl: string): ApiClient;
@@ -48,6 +49,9 @@ export function AuthProvider({
   const [session, setSession] = useState<Session | null>(() => store.load());
   // Ref para leitura sempre atual dentro dos callbacks do ApiClient.
   const sessionRef = useRef<Session | null>(session);
+  // Um refresh token e rotativo: requisicoes 401 concorrentes devem compartilhar
+  // exatamente a mesma renovacao para nao invalidarem umas as outras.
+  const refreshPromiseRef = useRef<Promise<string | null> | null>(null);
   sessionRef.current = session;
 
   const authApi = useMemo(
@@ -67,13 +71,23 @@ export function AuthProvider({
       const pair = await authApi.login(tenantId, email, password);
       const next: Session = { tenantId, email, ...pair };
       store.save(next);
+      sessionRef.current = next;
       setSession(next);
     },
     [authApi, store],
   );
 
+  const activate = useCallback(
+    async (tenantId: string, activationToken: string, password: string): Promise<void> =>
+      authApi.activate(tenantId, activationToken, password),
+    [authApi],
+  );
+
   const logout = useCallback(async (): Promise<void> => {
     const current = sessionRef.current;
+    sessionRef.current = null;
+    store.clear();
+    setSession(null);
     if (current) {
       try {
         await authApi.logout(current.tenantId, current.refreshToken);
@@ -81,24 +95,39 @@ export function AuthProvider({
         // Falha no logout remoto nao impede encerrar a sessao local.
       }
     }
-    store.clear();
-    setSession(null);
   }, [authApi, store]);
 
-  const refresh = useCallback(async (): Promise<string | null> => {
+  const refresh = useCallback((): Promise<string | null> => {
+    if (refreshPromiseRef.current) return refreshPromiseRef.current;
+
     const current = sessionRef.current;
-    if (!current) return null;
-    try {
-      const pair = await authApi.refresh(current.tenantId, current.refreshToken);
-      const next: Session = { ...current, ...pair };
-      store.save(next);
-      setSession(next);
-      return next.accessToken;
-    } catch {
-      store.clear();
-      setSession(null);
-      return null;
-    }
+    if (!current) return Promise.resolve(null);
+
+    const inFlight = (async (): Promise<string | null> => {
+      try {
+        const pair = await authApi.refresh(current.tenantId, current.refreshToken);
+        // Logout, novo login ou outra troca de sessao durante a chamada vence.
+        if (sessionRef.current?.refreshToken !== current.refreshToken) return null;
+        const next: Session = { ...current, ...pair };
+        store.save(next);
+        sessionRef.current = next;
+        setSession(next);
+        return next.accessToken;
+      } catch {
+        if (sessionRef.current?.refreshToken === current.refreshToken) {
+          store.clear();
+          sessionRef.current = null;
+          setSession(null);
+        }
+        return null;
+      }
+    })();
+
+    refreshPromiseRef.current = inFlight;
+    void inFlight.finally(() => {
+      if (refreshPromiseRef.current === inFlight) refreshPromiseRef.current = null;
+    });
+    return inFlight;
   }, [authApi, store]);
 
   const clientFor = useCallback(
@@ -113,8 +142,15 @@ export function AuthProvider({
   );
 
   const value = useMemo<AuthContextValue>(
-    () => ({ session, isAuthenticated: session !== null, login, logout, clientFor }),
-    [session, login, logout, clientFor],
+    () => ({
+      session,
+      isAuthenticated: session !== null,
+      login,
+      activate,
+      logout,
+      clientFor,
+    }),
+    [session, login, activate, logout, clientFor],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -1,78 +1,117 @@
-# Publicar no GitHub
+# Configuração do GitHub para development
 
-O repositório já foi inicializado localmente com um commit inicial na branch
-`main`. Estes passos publicam o código no GitHub. Nada aqui foi executado
-automaticamente: rode você mesmo quando quiser publicar.
+O repositório usa GitHub Actions com identidade OIDC temporária. Nenhuma chave
+AWS de longa duração deve ser cadastrada em Secrets ou Variables.
 
-## Antes de publicar
+## Environment
 
-1. **Confira a identidade do git.** Foi definida uma identidade local de
-   placeholder apenas neste repositório:
+Crie um GitHub Environment chamado **development**. Recomenda-se:
 
-   ```bash
-   git config user.name    # DentalPrime Dev
-   git config user.email   # dev@dentalprime.local
-   ```
+- required reviewer para autorizar implantações;
+- impedir self-review quando houver mais de um mantenedor;
+- restringir deployment branches à main;
+- manter as variáveis abaixo no Environment, não como segredo no código.
 
-   Ajuste para a sua identidade real (recomendado):
+| Variável | Obrigatória | Finalidade |
+| --- | --- | --- |
+| AWS_ACCOUNT_ID | sim | ID AWS de 12 dígitos |
+| AWS_DEPLOY_ROLE | recomendada | ARN da role assumida pelo workflow |
+| BEDROCK_MODEL_ID | só com Bedrock | ID ou ARN completo do modelo/profile |
+| BEDROCK_GUARDRAIL_ID | opcional | ID do guardrail |
+| BEDROCK_GUARDRAIL_VERSION | junto do ID | versão do guardrail |
+| CLINICAL_DOCUMENTS_CORS_ORIGINS | staging/production | origins HTTPS separadas por vírgula |
 
-   ```bash
-   git config user.name "Seu Nome"
-   git config user.email "seu-email@exemplo.com"
-   ```
+Se AWS_DEPLOY_ROLE não for informada, o workflow usa
+arn:aws:iam::<conta>:role/dentalprime-deploy-development.
 
-2. **Revise o que foi commitado.** Nenhum segredo ou `node_modules` entrou
-   (bloqueados pelo `.gitignore`).
+O workflow release aceita AWS_OIDC_ROLE para publicar imagens e executar diff.
+Ele não implanta stacks. Em uma instalação mínima, prefira conceder à role de
+release somente ECR push, leitura CloudFormation/CDK e leitura dos recursos
+necessários ao diff.
 
-   ```bash
-   git log --oneline
-   git show --stat HEAD
-   ```
+## Trust policy OIDC
 
-## Opção A — GitHub CLI (recomendado)
+Cadastre o provider token.actions.githubusercontent.com na conta AWS e limite a
+trust policy ao repositório e ao Environment development. Substitua
+ORGANIZACAO/REPOSITORIO e o ID da conta:
 
-Se você tem o `gh` instalado e autenticado (`gh auth login`):
+~~~json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::<conta>:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+          "token.actions.githubusercontent.com:sub": "repo:ORGANIZACAO/REPOSITORIO:environment:development"
+        }
+      }
+    }
+  ]
+}
+~~~
 
-```bash
-# cria o repositorio remoto (privado) e faz o push da branch main
-gh repo create dentalprime --private --source=. --remote=origin --push
-```
+Não use wildcard para aceitar qualquer repositório ou Environment.
 
-## Opção B — Manual
+## Permissões da role de deploy
 
-1. Crie um repositório vazio no GitHub (sem README, sem .gitignore, sem
-   licença), por exemplo `dentalprime`.
-2. Ligue o remoto e faça o push:
+CDK precisa publicar assets, ler/escrever os stacks e assumir as roles do
+bootstrap nas duas regiões. A prática recomendada é:
 
-   ```bash
-   git remote add origin git@github.com:SUA_ORG/dentalprime.git
-   git push -u origin main
-   ```
+1. executar CDK bootstrap em sa-east-1 e us-east-1 com trust apenas na role de
+   deploy;
+2. permitir sts:AssumeRole somente nas roles cdk-hnb659fds-* da conta;
+3. conceder ECR push apenas em dentalprime/*;
+4. permitir ecs:RunTask, ecs:DescribeTasks e iam:PassRole somente nas task roles
+   e execution roles criadas pelo stack;
+5. permitir as leituras CloudFormation, ECS, CloudWatch e CloudFront usadas nos
+   gates, incluindo logs:GetLogEvents somente nos grupos do DentalPrime;
+6. permitir sync nos dois buckets de frontend e criação de invalidação somente
+   nas distribuições do ambiente.
 
-   (Use a URL HTTPS `https://github.com/SUA_ORG/dentalprime.git` se preferir
-   autenticação por token em vez de SSH.)
+Evite uma policy AdministratorAccess permanente. Durante o primeiro bootstrap,
+uma role separada de plataforma pode criar/ajustar as roles do CDK; a role diária
+de deploy assume apenas essas roles controladas.
 
-## Fluxo de trabalho a partir daqui
+## Proteções de branch
 
-- Trabalhe por branch de funcionalidade; não commite direto em `main`
-  (ver `.kiro/steering/coding-standards.md`).
+Na branch main, exija:
 
-  ```bash
-  git checkout -b feat/identity-access
-  # ... implementar conforme .kiro/specs/identity-access/tasks.md ...
-  git push -u origin feat/identity-access
-  ```
+- pull request antes de merge;
+- checks do workflow ci;
+- branch atualizada antes do merge;
+- revisão de CODEOWNERS para infrastructure, workflows e migrations;
+- bloqueio de force-push e exclusão.
 
-- Abra Pull Request com resumo do que mudou, o que foi testado e riscos.
-- CI (a configurar) deve rodar `npm ci`, `npm run lint`, `npm run build` e
-  `npm test`.
+## Workflows
 
-## Comandos do monorepo
+- ci: build, lint, formatação, testes, typecheck mobile, migrations sequenciais
+  em PostgreSQL TLS, smoke das sete imagens e CDK synth --strict offline.
+- release: publica tags imutáveis no ECR já provisionado e mostra cdk diff.
+- deploy-development: provisiona base, registra a revisão nova, migra, executa o
+  bootstrap one-shot, publica o Tenant ID não sensível no resumo, ativa os
+  serviços, publica os dois frontends e executa gates de saúde e alarmes.
 
-```bash
-npm install        # instala dependencias (workspaces)
-npm run build      # compila todos os pacotes (tsc --build)
-npm run lint       # ESLint
-npm run format     # Prettier (escreve)
-npm test           # Vitest (roda uma vez)
-```
+Todas as Actions externas estão fixadas por SHA para impedir que uma tag móvel
+troque o código executado sem revisão.
+
+As tags ECR são o SHA do commit e são imutáveis. Reexecutar um workflow não
+sobrescreve a imagem; ele reutiliza a tag existente somente quando ela já foi
+publicada para o mesmo SHA.
+
+## Checklist inicial
+
+1. Confirme AWS_ACCOUNT_ID e AWS_DEPLOY_ROLE no Environment development.
+2. Revise a trust OIDC no IAM.
+3. Proteja o Environment com reviewer.
+4. Execute ci e confirme o synth estrito.
+5. Execute deploy-development com AI_PROVIDER stub.
+6. Abra o resumo do job e valide as URLs clinic e admin.
+7. Confirme dashboard, CloudTrail, DLQ e recovery point no AWS Backup.
+8. Recupere o segredo bootstrap-admin em uma sessão local autorizada, faça o
+   primeiro login e troque a senha; não copie a credencial para logs do GitHub.

@@ -319,3 +319,29 @@ button.link {
   font-style: italic;
   padding: 12px 0;
 }
+
+.dashboard-section {
+  margin-bottom: 32px;
+}
+
+.metric-card {
+  display: flex;
+  min-height: 150px;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.metric-label {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.metric-value {
+  color: var(--brand-dark);
+  font-size: 30px;
+  line-height: 1.15;
+}
+
+.shortcut-heading {
+  margin-top: 0;
+}

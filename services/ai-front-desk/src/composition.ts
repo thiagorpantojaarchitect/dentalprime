@@ -1,12 +1,12 @@
 /**
  * Composicao das dependencias de producao do ai-front-desk.
  *
- * O AIProvider e injetado (plugavel). Por ora usamos o StubAIProvider; um
- * adaptador real (Bedrock/OpenAI/privado) pode ser injetado sem alterar o
- * dominio, com chaves resolvidas do Secrets Manager em runtime.
+ * O AIProvider e injetado (plugavel). A raiz de execucao escolhe explicitamente
+ * stub apenas em development ou Bedrock com configuracao completa; nunca ha
+ * degradacao silenciosa entre provedores.
  */
 
-import { StubAIProvider, type AIProvider } from "./application/ai-provider.js";
+import type { AIProvider } from "./application/ai-provider.js";
 import { AuditService } from "./application/audit-service.js";
 import { ConversationService } from "./application/conversation-service.js";
 import {
@@ -29,10 +29,7 @@ export interface Composition extends AppDeps {
   readonly connection: DbConnection;
 }
 
-export function composeProduction(
-  config: Config,
-  aiProvider: AIProvider = new StubAIProvider(),
-): Composition {
+export function composeProduction(config: Config, aiProvider: AIProvider): Composition {
   const connection = createDbConnection(config.databaseUrl);
   const db = connection.db;
 
@@ -72,5 +69,7 @@ export function composeProduction(
     conversations,
     handoffs,
     suggestions,
+    trustProxy: config.trustProxy,
+    readinessCheck: connection.checkReady,
   };
 }

@@ -6,6 +6,7 @@
  */
 
 import rateLimit from "@fastify/rate-limit";
+import { trustProxyForHops } from "@dentalprime/core";
 import Fastify, { type FastifyInstance } from "fastify";
 
 import type { AuthService } from "./application/auth-service.js";
@@ -22,13 +23,16 @@ export interface AppDeps {
   readonly network: NetworkService;
   readonly tokens: TokenService;
   readonly loginRateLimitPerMinute: number;
+  readonly trustProxy?: number;
+  readonly readinessCheck?: () => Promise<void>;
+  readonly rateLimitRedis?: unknown;
 }
 
 export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
   const app = Fastify({
+    // Fastify nao inclui corpo/credenciais nos logs de request padrao.
     logger: { level: process.env.LOG_LEVEL ?? "info" },
-    // Nao logar corpo de requisicao para evitar vazamento de credenciais/PII.
-    disableRequestLogging: false,
+    trustProxy: trustProxyForHops(deps.trustProxy ?? 0),
   });
 
   // Handler global de erros: mapeia erros de dominio (inclusive os lancados em
@@ -37,8 +41,17 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
     return sendError(reply, error);
   });
 
-  await app.register(rateLimit, { global: false });
+  await app.register(rateLimit, { global: false, redis: deps.rateLimitRedis });
   await app.register(authPlugin, { tokens: deps.tokens });
+
+  app.get("/ready", async (_request, reply) => {
+    try {
+      await deps.readinessCheck?.();
+      return reply.send({ status: "ready" });
+    } catch {
+      return reply.status(503).send({ status: "unavailable" });
+    }
+  });
 
   await app.register(async (instance) => {
     await registerRoutes(instance, {

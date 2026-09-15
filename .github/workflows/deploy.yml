@@ -1,32 +1,20 @@
-# Deploy: implantacao na AWS com aprovacao por ambiente.
-#
-# Acionado MANUALMENTE (workflow_dispatch). A aprovacao e feita pela protecao do
-# GitHub Environment escolhido (required reviewers configurados no repositorio):
-# o job so executa apos aprovacao humana. Producao deve ter reviewers extras.
-#
-# Ordem: (1) migracoes de banco (ECS RunTask, RUN_MODE=migrate) e (2) cdk deploy
-# dos stacks com a tag de imagem do commit. Autenticacao por OIDC (sem chaves
-# estaticas), com uma role de DEPLOY dedicada (privilegios maiores que a de CI).
-#
-# Autenticar aqui nao concede permissao de deploy fora deste fluxo controlado.
+# Provisionamento completo do ambiente development.
+# Ordem: bootstrap/base/registry -> imagens -> ECS sem replicas -> migrations
+# da revisao nova -> ativacao -> frontends -> health e alarm gates.
 
-name: deploy
+name: deploy-development
 
 on:
   workflow_dispatch:
     inputs:
-      environment:
-        description: Ambiente alvo do deploy
+      aiProvider:
+        description: Provedor de IA do ambiente
         type: choice
-        options: [development, staging, production]
-        default: development
-      imageTag:
-        description: Tag da imagem no ECR (padrao - SHA do commit atual)
-        type: string
-        required: false
+        options: [stub, bedrock]
+        default: stub
 
 concurrency:
-  group: deploy-${{ inputs.environment }}
+  group: deploy-development
   cancel-in-progress: false
 
 permissions:
@@ -35,77 +23,458 @@ permissions:
 
 env:
   AWS_REGION: sa-east-1
-  CLUSTER: dentalprime-cluster-${{ inputs.environment }}
+  EDGE_REGION: us-east-1
+  CDK_ENV: development
+  STACK_PREFIX: dentalprime-development
+  IMAGE_TAG: ${{ github.sha }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  AI_PROVIDER: ${{ inputs.aiProvider }}
+  BEDROCK_MODEL_ID: ${{ vars.BEDROCK_MODEL_ID }}
+  BEDROCK_GUARDRAIL_ID: ${{ vars.BEDROCK_GUARDRAIL_ID }}
+  BEDROCK_GUARDRAIL_VERSION: ${{ vars.BEDROCK_GUARDRAIL_VERSION }}
 
 jobs:
-  deploy:
-    name: deploy (${{ inputs.environment }})
+  verify:
+    name: verificar revisao antes da AWS
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    # A protecao deste Environment (required reviewers) e o gate de aprovacao.
-    environment: ${{ inputs.environment }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Configurar Node 22
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
           cache: npm
-
-      - name: Instalar dependencias
-        run: npm ci
-
-      - name: Definir a tag da imagem
-        id: image
-        run: echo "tag=${{ inputs.imageTag || github.sha }}" >> "$GITHUB_OUTPUT"
-
-      - name: Autenticar na AWS (OIDC, role de deploy)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE || format('arn:aws:iam::{0}:role/dentalprime-deploy-{1}', vars.AWS_ACCOUNT_ID, inputs.environment) }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      # Migracoes ANTES de rotar os servicos. Cada task de migracao e idempotente
-      # (Drizzle so aplica o que falta) e encerra ao concluir.
-      - name: Aplicar migracoes de banco
+      - run: npm ci
+      - name: Build e typecheck
         run: |
-          set -euo pipefail
-          SERVICES="identity-access patient-record smart-scheduling treatment-plan finance crm-growth ai-front-desk"
-          # Subnets privadas e SG dos servicos vem de variaveis do ambiente.
-          SUBNETS="${{ vars.PRIVATE_SUBNET_IDS }}"
-          SG="${{ vars.SERVICE_SECURITY_GROUP_ID }}"
-          if [ -z "$SUBNETS" ] || [ -z "$SG" ]; then
-            echo "Configure as variaveis PRIVATE_SUBNET_IDS e SERVICE_SECURITY_GROUP_ID no Environment." >&2
+          npm run build
+          npm run build --workspace @dentalprime/clinic-web
+          npm run build --workspace @dentalprime/admin-portal
+          npm run typecheck:mobile
+      - name: Qualidade e testes
+        run: |
+          npm run lint
+          npm run format:check
+          npm test
+          npm test --workspace @dentalprime/clinic-web
+          npm test --workspace @dentalprime/admin-portal
+      - name: Synth estrito offline
+        run: >-
+          npm run synth --workspace @dentalprime/infrastructure --
+          --strict
+          -c env=development
+          -c account=111111111111
+          -c desiredCount=0
+
+  bootstrap-base:
+    name: bootstrap e infraestrutura base
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: development
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+
+      - name: Validar configuracao
+        shell: bash
+        run: |
+          if [[ ! "$AWS_ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
+            echo "Configure AWS_ACCOUNT_ID no Environment development." >&2
             exit 1
           fi
-          NETCFG="awsvpcConfiguration={subnets=[${SUBNETS}],securityGroups=[${SG}],assignPublicIp=DISABLED}"
+          if [ "$AI_PROVIDER" = "bedrock" ] && [ -z "$BEDROCK_MODEL_ID" ]; then
+            echo "BEDROCK_MODEL_ID e obrigatorio para Bedrock." >&2
+            exit 1
+          fi
+          if { [ -n "$BEDROCK_GUARDRAIL_ID" ] && [ -z "$BEDROCK_GUARDRAIL_VERSION" ]; } || \
+             { [ -z "$BEDROCK_GUARDRAIL_ID" ] && [ -n "$BEDROCK_GUARDRAIL_VERSION" ]; }; then
+            echo "BEDROCK_GUARDRAIL_ID e VERSION devem ser configurados juntos." >&2
+            exit 1
+          fi
+
+      - name: Autenticar na AWS por OIDC
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE || format('arn:aws:iam::{0}:role/dentalprime-deploy-development', vars.AWS_ACCOUNT_ID) }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Bootstrap CDK nas duas regioes
+        working-directory: infrastructure
+        run: |
+          set -euo pipefail
+          npx cdk bootstrap "aws://$AWS_ACCOUNT_ID/$AWS_REGION" --termination-protection
+          npx cdk bootstrap "aws://$AWS_ACCOUNT_ID/$EDGE_REGION" --termination-protection
+
+      - name: Synth estrito
+        working-directory: infrastructure
+        shell: bash
+        run: |
+          set -euo pipefail
+          CONTEXT=(-c "env=$CDK_ENV" -c "account=$AWS_ACCOUNT_ID" -c "imageTag=$IMAGE_TAG" -c "desiredCount=0" -c "aiProvider=$AI_PROVIDER")
+          if [ "$AI_PROVIDER" = "bedrock" ]; then CONTEXT+=(-c "bedrockModelId=$BEDROCK_MODEL_ID"); fi
+          if [ -n "$BEDROCK_GUARDRAIL_ID" ]; then
+            CONTEXT+=(-c "bedrockGuardrailId=$BEDROCK_GUARDRAIL_ID" -c "bedrockGuardrailVersion=$BEDROCK_GUARDRAIL_VERSION")
+          fi
+          npx cdk synth --strict "${CONTEXT[@]}"
+
+      - name: Implantar base e registry
+        working-directory: infrastructure
+        shell: bash
+        run: |
+          set -euo pipefail
+          CONTEXT=(-c "env=$CDK_ENV" -c "account=$AWS_ACCOUNT_ID" -c "imageTag=$IMAGE_TAG" -c "desiredCount=0" -c "aiProvider=$AI_PROVIDER")
+          if [ "$AI_PROVIDER" = "bedrock" ]; then CONTEXT+=(-c "bedrockModelId=$BEDROCK_MODEL_ID"); fi
+          if [ -n "$BEDROCK_GUARDRAIL_ID" ]; then
+            CONTEXT+=(-c "bedrockGuardrailId=$BEDROCK_GUARDRAIL_ID" -c "bedrockGuardrailVersion=$BEDROCK_GUARDRAIL_VERSION")
+          fi
+          npx cdk deploy \
+            "$STACK_PREFIX-network" "$STACK_PREFIX-security" \
+            "$STACK_PREFIX-registry" "$STACK_PREFIX-data" \
+            "$STACK_PREFIX-messaging" "${CONTEXT[@]}" \
+            --strict --concurrency 3 --require-approval never
+
+  build-push:
+    name: imagem ${{ matrix.service.name }}
+    needs: bootstrap-base
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment: development
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - { name: identity-access, port: 3001 }
+          - { name: patient-record, port: 3002 }
+          - { name: smart-scheduling, port: 3003 }
+          - { name: treatment-plan, port: 3004 }
+          - { name: finance, port: 3005 }
+          - { name: crm-growth, port: 3006 }
+          - { name: ai-front-desk, port: 3007 }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Autenticar na AWS por OIDC
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE || format('arn:aws:iam::{0}:role/dentalprime-deploy-development', vars.AWS_ACCOUNT_ID) }}
+          aws-region: ${{ env.AWS_REGION }}
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
+      - name: Verificar tag imutavel
+        id: image
+        run: |
+          if aws ecr describe-images \
+            --repository-name "dentalprime/${{ matrix.service.name }}" \
+            --image-ids "imageTag=$IMAGE_TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.image.outputs.exists != 'true'
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build e push
+        if: steps.image.outputs.exists != 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            SERVICE=${{ matrix.service.name }}
+            PORT=${{ matrix.service.port }}
+          tags: ${{ steps.ecr.outputs.registry }}/dentalprime/${{ matrix.service.name }}:${{ env.IMAGE_TAG }}
+          cache-from: type=gha,scope=${{ matrix.service.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service.name }}
+
+  migrate:
+    name: registrar tasks e migrar banco
+    needs: build-push
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: development
+    outputs:
+      tenant_id: ${{ steps.bootstrap.outputs.tenant_id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Autenticar na AWS por OIDC
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE || format('arn:aws:iam::{0}:role/dentalprime-deploy-development', vars.AWS_ACCOUNT_ID) }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Registrar revisao nova sem ativar servicos
+        working-directory: infrastructure
+        shell: bash
+        run: |
+          set -euo pipefail
+          CONTEXT=(-c "env=$CDK_ENV" -c "account=$AWS_ACCOUNT_ID" -c "imageTag=$IMAGE_TAG" -c "desiredCount=0" -c "aiProvider=$AI_PROVIDER")
+          if [ "$AI_PROVIDER" = "bedrock" ]; then CONTEXT+=(-c "bedrockModelId=$BEDROCK_MODEL_ID"); fi
+          if [ -n "$BEDROCK_GUARDRAIL_ID" ]; then
+            CONTEXT+=(-c "bedrockGuardrailId=$BEDROCK_GUARDRAIL_ID" -c "bedrockGuardrailVersion=$BEDROCK_GUARDRAIL_VERSION")
+          fi
+          npx cdk deploy "$STACK_PREFIX-compute" "${CONTEXT[@]}" \
+            --strict --require-approval never
+
+      - name: Executar a revisao exata das migrations
+        shell: bash
+        run: |
+          set -euo pipefail
+          CLUSTER="dentalprime-cluster-$CDK_ENV"
+          SUBNETS=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_PREFIX-network" \
+            --query "Stacks[0].Outputs[?OutputKey=='PrivateSubnetIds'].OutputValue | [0]" \
+            --output text)
+          SG=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_PREFIX-compute" \
+            --query "Stacks[0].Outputs[?OutputKey=='ServiceSecurityGroupId'].OutputValue | [0]" \
+            --output text)
+          if [ -z "$SUBNETS" ] || [ "$SUBNETS" = "None" ] || [ -z "$SG" ] || [ "$SG" = "None" ]; then
+            echo "Outputs de rede para migration nao encontrados." >&2
+            exit 1
+          fi
+          NETCFG="awsvpcConfiguration={subnets=[$SUBNETS],securityGroups=[$SG],assignPublicIp=DISABLED}"
+          SERVICES="identity-access patient-record smart-scheduling treatment-plan finance crm-growth ai-front-desk"
           for svc in $SERVICES; do
-            TASKDEF="dentalprime-${svc}-migrate-${{ inputs.environment }}"
-            echo "== Migrando ${svc} (${TASKDEF}) =="
-            TASK_ARN=$(aws ecs run-task \
-              --cluster "$CLUSTER" \
-              --task-definition "$TASKDEF" \
-              --launch-type FARGATE \
-              --network-configuration "$NETCFG" \
-              --query 'tasks[0].taskArn' --output text)
-            echo "Aguardando conclusao de ${TASK_ARN}"
+            FAMILY="dentalprime-$svc-migrate-$CDK_ENV"
+            TASKDEF=$(aws ecs describe-task-definition \
+              --task-definition "$FAMILY" \
+              --query "taskDefinition.{arn:taskDefinitionArn,image:containerDefinitions[?name=='$svc-migrate'].image | [0]}" \
+              --output json)
+            TASKDEF_ARN=$(jq -r '.arn' <<<"$TASKDEF")
+            TASK_IMAGE=$(jq -r '.image' <<<"$TASKDEF")
+            if [[ "$TASK_IMAGE" != *":$IMAGE_TAG" ]]; then
+              echo "Task de migration de $svc nao usa a imagem $IMAGE_TAG." >&2
+              exit 1
+            fi
+            RUN_RESULT=$(aws ecs run-task \
+              --cluster "$CLUSTER" --task-definition "$TASKDEF_ARN" \
+              --launch-type FARGATE --network-configuration "$NETCFG")
+            if [ "$(jq '.failures | length' <<<"$RUN_RESULT")" -ne 0 ]; then
+              jq '.failures' <<<"$RUN_RESULT" >&2
+              exit 1
+            fi
+            TASK_ARN=$(jq -r '.tasks[0].taskArn' <<<"$RUN_RESULT")
             aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK_ARN"
-            EXIT_CODE=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" \
-              --query 'tasks[0].containers[0].exitCode' --output text)
+            EXIT_CODE=$(aws ecs describe-tasks \
+              --cluster "$CLUSTER" --tasks "$TASK_ARN" \
+              --query "tasks[0].containers[?name=='$svc-migrate'].exitCode | [0]" \
+              --output text)
             if [ "$EXIT_CODE" != "0" ]; then
-              echo "Migracao de ${svc} falhou (exitCode=${EXIT_CODE})." >&2
+              aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" \
+                --query 'tasks[0].{stoppedReason:stoppedReason,containers:containers[*].{name:name,reason:reason,exitCode:exitCode}}' \
+                --output json >&2
               exit 1
             fi
           done
 
-      # Implanta a infraestrutura/servicos com a tag da imagem deste deploy.
-      # A aprovacao ja ocorreu no gate do Environment; sem prompt interativo.
-      - name: cdk deploy
+      - name: Bootstrap idempotente do primeiro tenant
+        id: bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          FAMILY="dentalprime-identity-access-migrate-$CDK_ENV"
+          TASKDEF=$(aws ecs describe-task-definition \
+            --task-definition "$FAMILY" \
+            --query "taskDefinition.{arn:taskDefinitionArn,image:containerDefinitions[?name=='identity-access-migrate'].image | [0]}" \
+            --output json)
+          TASKDEF_ARN=$(jq -r '.arn' <<<"$TASKDEF")
+          TASK_IMAGE=$(jq -r '.image' <<<"$TASKDEF")
+          if [[ "$TASK_IMAGE" != *":$IMAGE_TAG" ]]; then
+            echo "Task de bootstrap nao usa a imagem $IMAGE_TAG." >&2
+            exit 1
+          fi
+          SUBNETS=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_PREFIX-network" \
+            --query "Stacks[0].Outputs[?OutputKey=='PrivateSubnetIds'].OutputValue | [0]" \
+            --output text)
+          SG=$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_PREFIX-compute" \
+            --query "Stacks[0].Outputs[?OutputKey=='ServiceSecurityGroupId'].OutputValue | [0]" \
+            --output text)
+          NETCFG="awsvpcConfiguration={subnets=[$SUBNETS],securityGroups=[$SG],assignPublicIp=DISABLED}"
+          OVERRIDES=$(jq -nc '{containerOverrides:[{name:"identity-access-migrate",environment:[{name:"RUN_MODE",value:"bootstrap"},{name:"NODE_ENV",value:"development"},{name:"ALLOW_DEVELOPMENT_BOOTSTRAP",value:"true"}]}]}')
+          RUN_RESULT=$(aws ecs run-task \
+            --cluster "dentalprime-cluster-$CDK_ENV" \
+            --task-definition "$TASKDEF_ARN" \
+            --launch-type FARGATE --network-configuration "$NETCFG" \
+            --overrides "$OVERRIDES")
+          if [ "$(jq '.failures | length' <<<"$RUN_RESULT")" -ne 0 ]; then
+            jq '.failures' <<<"$RUN_RESULT" >&2
+            exit 1
+          fi
+          TASK_ARN=$(jq -r '.tasks[0].taskArn' <<<"$RUN_RESULT")
+          aws ecs wait tasks-stopped \
+            --cluster "dentalprime-cluster-$CDK_ENV" --tasks "$TASK_ARN"
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster "dentalprime-cluster-$CDK_ENV" --tasks "$TASK_ARN" \
+            --query "tasks[0].containers[?name=='identity-access-migrate'].exitCode | [0]" \
+            --output text)
+          if [ "$EXIT_CODE" != "0" ]; then
+            aws ecs describe-tasks \
+              --cluster "dentalprime-cluster-$CDK_ENV" --tasks "$TASK_ARN" \
+              --query 'tasks[0].{stoppedReason:stoppedReason,containers:containers[*].{name:name,reason:reason,exitCode:exitCode}}' \
+              --output json >&2
+            exit 1
+          fi
+
+          # A senha permanece no Secrets Manager. Somente o identificador nao
+          # sensivel do tenant e recuperado do stream exclusivo desta task.
+          TASK_ID="${TASK_ARN##*/}"
+          LOG_GROUP="/dentalprime/$CDK_ENV/identity-access"
+          LOG_STREAM="identity-access-migrate/identity-access-migrate/$TASK_ID"
+          TENANT_ID=""
+          for attempt in {1..12}; do
+            MESSAGES=$(aws logs get-log-events \
+              --log-group-name "$LOG_GROUP" --log-stream-name "$LOG_STREAM" \
+              --start-from-head --query 'events[].message' --output text 2>/dev/null || true)
+            TENANT_ID=$(sed -nE \
+              's/.*Tenant ID: ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\..*/\1/p' \
+              <<<"$MESSAGES" | tail -n 1)
+            if [[ "$TENANT_ID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+              break
+            fi
+            sleep 5
+          done
+          if [[ ! "$TENANT_ID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            echo "Tenant ID nao encontrado no stream auditado do bootstrap." >&2
+            exit 1
+          fi
+          echo "tenant_id=$TENANT_ID" >> "$GITHUB_OUTPUT"
+
+  activate:
+    name: ativar, publicar e verificar
+    needs: migrate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: development
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Autenticar na AWS por OIDC
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE || format('arn:aws:iam::{0}:role/dentalprime-deploy-development', vars.AWS_ACCOUNT_ID) }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Ativar ECS, borda e observabilidade
         working-directory: infrastructure
-        run: >-
-          npx cdk deploy --all
-          -c env=${{ inputs.environment }}
-          -c imageTag=${{ steps.image.outputs.tag }}
-          --require-approval never
+        shell: bash
+        run: |
+          set -euo pipefail
+          CONTEXT=(-c "env=$CDK_ENV" -c "account=$AWS_ACCOUNT_ID" -c "imageTag=$IMAGE_TAG" -c "aiProvider=$AI_PROVIDER")
+          if [ "$AI_PROVIDER" = "bedrock" ]; then CONTEXT+=(-c "bedrockModelId=$BEDROCK_MODEL_ID"); fi
+          if [ -n "$BEDROCK_GUARDRAIL_ID" ]; then
+            CONTEXT+=(-c "bedrockGuardrailId=$BEDROCK_GUARDRAIL_ID" -c "bedrockGuardrailVersion=$BEDROCK_GUARDRAIL_VERSION")
+          fi
+          npx cdk deploy "$STACK_PREFIX-compute" "$STACK_PREFIX-edge" \
+            "$STACK_PREFIX-observability" "${CONTEXT[@]}" \
+            --strict --concurrency 2 --require-approval never
+
+      - name: Aguardar estabilidade ECS
+        run: |
+          SERVICES=""
+          for svc in identity-access patient-record smart-scheduling treatment-plan finance crm-growth ai-front-desk; do
+            SERVICES="$SERVICES dentalprime-$svc-$CDK_ENV"
+          done
+          aws ecs wait services-stable \
+            --cluster "dentalprime-cluster-$CDK_ENV" --services $SERVICES
+
+      - name: Build dos dois frontends
+        run: |
+          npm run build --workspace @dentalprime/clinic-web
+          npm run build --workspace @dentalprime/admin-portal
+
+      - name: Publicar frontends e invalidar caches
+        id: frontends
+        shell: bash
+        run: |
+          set -euo pipefail
+          output() {
+            aws cloudformation describe-stacks --region "$EDGE_REGION" \
+              --stack-name "$STACK_PREFIX-edge" \
+              --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue | [0]" \
+              --output text
+          }
+          CLINIC_BUCKET=$(output ClinicWebBucketName)
+          ADMIN_BUCKET=$(output AdminWebBucketName)
+          CLINIC_DISTRIBUTION=$(output ClinicDistributionId)
+          ADMIN_DISTRIBUTION=$(output AdminDistributionId)
+          CLINIC_URL=$(output ClinicUrl)
+          ADMIN_URL=$(output AdminUrl)
+          aws s3 sync apps/clinic-web/dist "s3://$CLINIC_BUCKET" \
+            --delete --exclude index.html --cache-control "public,max-age=31536000,immutable"
+          aws s3 cp apps/clinic-web/dist/index.html "s3://$CLINIC_BUCKET/index.html" \
+            --cache-control "no-cache,no-store,must-revalidate" --content-type text/html
+          aws s3 sync apps/admin-portal/dist "s3://$ADMIN_BUCKET" \
+            --delete --exclude index.html --cache-control "public,max-age=31536000,immutable"
+          aws s3 cp apps/admin-portal/dist/index.html "s3://$ADMIN_BUCKET/index.html" \
+            --cache-control "no-cache,no-store,must-revalidate" --content-type text/html
+          aws cloudfront create-invalidation \
+            --distribution-id "$CLINIC_DISTRIBUTION" --paths '/*' >/dev/null
+          aws cloudfront create-invalidation \
+            --distribution-id "$ADMIN_DISTRIBUTION" --paths '/*' >/dev/null
+          echo "clinic_url=$CLINIC_URL" >> "$GITHUB_OUTPUT"
+          echo "admin_url=$ADMIN_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Health gate publico por dominio
+        env:
+          CLINIC_URL: ${{ steps.frontends.outputs.clinic_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for domain in identity patients scheduling treatment finance crm ai; do
+            ok=false
+            for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+              if curl --fail --silent --show-error --max-time 10 \
+                "$CLINIC_URL/api/$domain/ready" >/dev/null; then
+                ok=true
+                break
+              fi
+              sleep 10
+            done
+            if [ "$ok" != "true" ]; then
+              echo "Healthcheck publico falhou para $domain." >&2
+              exit 1
+            fi
+          done
+
+      - name: Gate de alarmes
+        run: |
+          ACTIVE=$(aws cloudwatch describe-alarms \
+            --alarm-name-prefix "dentalprime-development-" --state-value ALARM \
+            --query 'length(MetricAlarms)' --output text)
+          if [ "$ACTIVE" != "0" ]; then
+            aws cloudwatch describe-alarms \
+              --alarm-name-prefix "dentalprime-development-" --state-value ALARM \
+              --query 'MetricAlarms[].{name:AlarmName,reason:StateReason}' \
+              --output table >&2
+            exit 1
+          fi
+
+      - name: Resumo
+        run: |
+          {
+            echo "## DentalPrime development implantado"
+            echo ""
+            echo "- Clinic: ${{ steps.frontends.outputs.clinic_url }}"
+            echo "- Admin: ${{ steps.frontends.outputs.admin_url }}"
+            echo "- Tenant ID inicial: ${{ needs.migrate.outputs.tenant_id }}"
+            echo "- Imagem: $IMAGE_TAG"
+            echo "- IA: $AI_PROVIDER"
+          } >> "$GITHUB_STEP_SUMMARY"

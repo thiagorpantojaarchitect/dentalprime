@@ -64,6 +64,14 @@ export class ConflictError extends DomainError {
   }
 }
 
+/** Entrada sintaticamente valida no transporte, mas invalida para o dominio. */
+export class ValidationError extends DomainError {
+  constructor(message = "Dados invalidos.") {
+    super("VALIDATION", message);
+    this.name = "ValidationError";
+  }
+}
+
 /**
  * Tentativa de acessar dado de outro tenant. Tratado como negacao e auditado.
  */

@@ -1,6 +1,7 @@
 /**
  * Ponto de entrada do frontend. Monta o AuthProvider (com SessionStore em
- * localStorage) e o roteador.
+ * sessionStorage) e o roteador. A sessao termina ao fechar a aba, reduzindo a
+ * persistencia de refresh tokens em um frontend que lida com dados sensiveis.
  */
 
 import { StrictMode } from "react";
@@ -18,7 +19,7 @@ if (!rootEl) {
   throw new Error("Elemento #root nao encontrado.");
 }
 
-const store = new SessionStore(window.localStorage);
+const store = new SessionStore(window.sessionStorage);
 const urls = getServiceUrls();
 
 createRoot(rootEl).render(

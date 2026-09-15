@@ -8,11 +8,14 @@ import { BedrockAIProvider } from "./bedrock-ai-provider.js";
 function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
     nodeEnv: "test",
+    deploymentEnv: "development",
     port: 3007,
     databaseUrl: "postgres://localhost:5432/test",
     jwtSecret: "x".repeat(32),
     aiProvider: "stub",
     bedrockRegion: "sa-east-1",
+    bedrockMaxTokens: 1024,
+    trustProxy: 0,
     ...overrides,
   };
 }
@@ -30,8 +33,9 @@ describe("createAIProvider", () => {
     expect(provider).toBeInstanceOf(BedrockAIProvider);
   });
 
-  it("faz fallback para stub quando aiProvider=bedrock sem modelId", () => {
-    const provider = createAIProvider(makeConfig({ aiProvider: "bedrock" }));
-    expect(provider).toBeInstanceOf(StubAIProvider);
+  it("falha fechado quando aiProvider=bedrock sem modelId", () => {
+    expect(() => createAIProvider(makeConfig({ aiProvider: "bedrock" }))).toThrow(
+      "BEDROCK_MODEL_ID",
+    );
   });
 });

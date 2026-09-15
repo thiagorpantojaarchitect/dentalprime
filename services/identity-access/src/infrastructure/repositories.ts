@@ -6,11 +6,12 @@
  */
 
 import type { ClinicUnitId, Role, TenantId, UserId } from "@dentalprime/core";
-import { and, asc, eq, isNull, gt } from "drizzle-orm";
+import { and, asc, eq, isNull, gt, inArray, sql } from "drizzle-orm";
 
 import type {
   AuditEntry,
   ClinicUnit,
+  Invitation,
   RoleAssignment,
   Session,
   Tenant,
@@ -20,6 +21,11 @@ import type {
 import type {
   AuditRepository,
   CreateUserInput,
+  InvitationRepository,
+  IdentityTransactionRepositories,
+  IdentityUnitOfWork,
+  IdentityUnitOfWorkOptions,
+  RepositoryPage,
   RoleRepository,
   SessionRepository,
   TenantRepository,
@@ -30,6 +36,7 @@ import type { Database } from "./db/client.js";
 import {
   auditLogs,
   clinicUnits,
+  invitations,
   roleAssignments,
   sessions,
   tenants,
@@ -104,12 +111,55 @@ export class DrizzleUserRepository implements UserRepository {
       .where(and(eq(users.tenantId, tenantId), eq(users.id, userId)));
   }
 
-  async listByTenant(tenantId: TenantId): Promise<User[]> {
+  async activatePending(
+    tenantId: TenantId,
+    userId: UserId,
+    passwordHash: string,
+  ): Promise<boolean> {
+    const rows = await this.db
+      .update(users)
+      .set({ status: "active", passwordHash, updatedAt: new Date() })
+      .where(
+        and(
+          eq(users.tenantId, tenantId),
+          eq(users.id, userId),
+          eq(users.status, "pending"),
+          isNull(users.passwordHash),
+        ),
+      )
+      .returning({ id: users.id });
+    return rows.length === 1;
+  }
+
+  async setPasswordHashIfCurrent(
+    tenantId: TenantId,
+    userId: UserId,
+    expectedPasswordHash: string,
+    newPasswordHash: string,
+  ): Promise<boolean> {
+    const rows = await this.db
+      .update(users)
+      .set({ passwordHash: newPasswordHash, updatedAt: new Date() })
+      .where(
+        and(
+          eq(users.tenantId, tenantId),
+          eq(users.id, userId),
+          eq(users.status, "active"),
+          eq(users.passwordHash, expectedPasswordHash),
+        ),
+      )
+      .returning({ id: users.id });
+    return rows.length === 1;
+  }
+
+  async listByTenant(tenantId: TenantId, page: RepositoryPage): Promise<User[]> {
     const rows = await this.db
       .select()
       .from(users)
       .where(eq(users.tenantId, tenantId))
-      .orderBy(asc(users.email));
+      .orderBy(asc(users.email), asc(users.id))
+      .limit(page.limit)
+      .offset(page.offset);
     return rows.map(toUser);
   }
 }
@@ -136,8 +186,13 @@ export class DrizzleTenantRepository implements TenantRepository {
     return row ? toTenant(row) : null;
   }
 
-  async list(): Promise<Tenant[]> {
-    const rows = await this.db.select().from(tenants).orderBy(asc(tenants.name));
+  async list(page: RepositoryPage): Promise<Tenant[]> {
+    const rows = await this.db
+      .select()
+      .from(tenants)
+      .orderBy(asc(tenants.name), asc(tenants.id))
+      .limit(page.limit)
+      .offset(page.offset);
     return rows.map(toTenant);
   }
 
@@ -174,12 +229,14 @@ export class DrizzleUnitRepository implements UnitRepository {
     return row ? toUnit(row) : null;
   }
 
-  async listByTenant(tenantId: TenantId): Promise<ClinicUnit[]> {
+  async listByTenant(tenantId: TenantId, page: RepositoryPage): Promise<ClinicUnit[]> {
     const rows = await this.db
       .select()
       .from(clinicUnits)
       .where(eq(clinicUnits.tenantId, tenantId))
-      .orderBy(asc(clinicUnits.name));
+      .orderBy(asc(clinicUnits.name), asc(clinicUnits.id))
+      .limit(page.limit)
+      .offset(page.offset);
     return rows.map(toUnit);
   }
 
@@ -219,6 +276,29 @@ export class DrizzleRoleRepository implements RoleRepository {
       .select()
       .from(roleAssignments)
       .where(eq(roleAssignments.tenantId, tenantId));
+    return rows.map((row) => ({
+      id: row.id,
+      tenantId: row.tenantId,
+      userId: row.userId,
+      role: row.role,
+      unitId: row.unitId,
+    }));
+  }
+
+  async listForUsers(
+    tenantId: TenantId,
+    userIds: readonly UserId[],
+  ): Promise<RoleAssignment[]> {
+    if (userIds.length === 0) return [];
+    const rows = await this.db
+      .select()
+      .from(roleAssignments)
+      .where(
+        and(
+          eq(roleAssignments.tenantId, tenantId),
+          inArray(roleAssignments.userId, [...userIds]),
+        ),
+      );
     return rows.map((row) => ({
       id: row.id,
       tenantId: row.tenantId,
@@ -307,6 +387,35 @@ export class DrizzleSessionRepository implements SessionRepository {
     };
   }
 
+  async consumeActiveByHash(
+    tenantId: TenantId,
+    refreshTokenHash: string,
+    now: Date,
+  ): Promise<Session | null> {
+    const rows = await this.db
+      .update(sessions)
+      .set({ revokedAt: now })
+      .where(
+        and(
+          eq(sessions.tenantId, tenantId),
+          eq(sessions.refreshTokenHash, refreshTokenHash),
+          isNull(sessions.revokedAt),
+          gt(sessions.expiresAt, now),
+        ),
+      )
+      .returning();
+    const row = rows[0];
+    if (!row) return null;
+    return {
+      id: row.id,
+      tenantId: row.tenantId,
+      userId: row.userId,
+      refreshTokenHash: row.refreshTokenHash,
+      expiresAt: row.expiresAt,
+      revokedAt: row.revokedAt,
+    };
+  }
+
   async revoke(tenantId: TenantId, sessionId: string): Promise<void> {
     await this.db
       .update(sessions)
@@ -328,6 +437,53 @@ export class DrizzleSessionRepository implements SessionRepository {
   }
 }
 
+function toInvitation(row: typeof invitations.$inferSelect): Invitation {
+  return {
+    id: row.id,
+    tenantId: row.tenantId,
+    userId: row.userId,
+    tokenHash: row.tokenHash,
+    expiresAt: row.expiresAt,
+    usedAt: row.usedAt,
+    createdByUserId: row.createdByUserId,
+  };
+}
+
+export class DrizzleInvitationRepository implements InvitationRepository {
+  constructor(private readonly db: Database) {}
+
+  async create(input: {
+    tenantId: TenantId;
+    userId: UserId;
+    tokenHash: string;
+    expiresAt: Date;
+    createdByUserId: UserId;
+  }): Promise<Invitation> {
+    const rows = await this.db.insert(invitations).values(input).returning();
+    return toInvitation(rows[0]!);
+  }
+
+  async consumeActive(
+    tenantId: TenantId,
+    tokenHash: string,
+    now: Date,
+  ): Promise<Invitation | null> {
+    const rows = await this.db
+      .update(invitations)
+      .set({ usedAt: now })
+      .where(
+        and(
+          eq(invitations.tenantId, tenantId),
+          eq(invitations.tokenHash, tokenHash),
+          isNull(invitations.usedAt),
+          gt(invitations.expiresAt, now),
+        ),
+      )
+      .returning();
+    return rows[0] ? toInvitation(rows[0]) : null;
+  }
+}
+
 export class DrizzleAuditRepository implements AuditRepository {
   constructor(private readonly db: Database) {}
 
@@ -340,6 +496,37 @@ export class DrizzleAuditRepository implements AuditRepository {
       resourceId: entry.resourceId,
       metadata: entry.metadata,
       ipAddress: entry.ipAddress,
+    });
+  }
+}
+
+/** PostgreSQL unit of work shared by the identity application workflows. */
+export class DrizzleIdentityUnitOfWork implements IdentityUnitOfWork {
+  constructor(private readonly db: Database) {}
+
+  async run<T>(
+    operation: (repositories: IdentityTransactionRepositories) => Promise<T>,
+    options: IdentityUnitOfWorkOptions = {},
+  ): Promise<T> {
+    return this.db.transaction(async (transaction) => {
+      if (options.advisoryLockId !== undefined) {
+        await transaction.execute(
+          sql`SELECT pg_advisory_xact_lock(${options.advisoryLockId})`,
+        );
+      }
+
+      // Drizzle transactions implement the same query surface used by these
+      // repositories. The cast is kept here, at the infrastructure boundary.
+      const db = transaction as unknown as Database;
+      return operation({
+        users: new DrizzleUserRepository(db),
+        tenants: new DrizzleTenantRepository(db),
+        units: new DrizzleUnitRepository(db),
+        roles: new DrizzleRoleRepository(db),
+        sessions: new DrizzleSessionRepository(db),
+        invitations: new DrizzleInvitationRepository(db),
+        audit: new DrizzleAuditRepository(db),
+      });
     });
   }
 }

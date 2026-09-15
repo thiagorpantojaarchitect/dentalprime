@@ -46,13 +46,18 @@ const inviteSchema = z.object({
 
 const activateSchema = z.object({
   tenantId: z.string().uuid(),
-  userId: z.string().uuid(),
+  activationToken: z.string().min(32).max(256),
   password: z.string().min(8),
 });
 
 const changeRoleSchema = z.object({
   role: z.enum(ROLES),
   unitId: z.string().uuid().nullable(),
+});
+
+const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1).max(256),
+  newPassword: z.string().min(12).max(256),
 });
 
 const provisionTenantSchema = z.object({
@@ -64,6 +69,11 @@ const provisionTenantSchema = z.object({
 const createUnitSchema = z.object({ name: z.string().min(1) });
 
 const unitIdParam = z.object({ unitId: z.string().uuid() });
+
+const paginationSchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(50),
+});
 
 export interface RouteDeps {
   readonly auth: AuthService;
@@ -146,28 +156,59 @@ export async function registerRoutes(
     }
   });
 
-  // --- Ativacao de conta (publica, valida userId+tenantId+senha) ---
+  // --- Ativacao publica com token aleatorio, expiravel e de uso unico ---
 
-  fastify.post("/users/activate", async (request, reply) => {
-    const parsed = activateSchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply
-        .status(400)
-        .send({ error: { code: "VALIDATION", message: "Dados invalidos." } });
-    }
-    try {
-      await deps.users.activate(
-        parsed.data.tenantId,
-        parsed.data.userId,
-        parsed.data.password,
-      );
-      return reply.status(204).send();
-    } catch (error) {
-      return sendError(reply, error);
-    }
-  });
+  fastify.post(
+    "/users/activate",
+    {
+      config: {
+        rateLimit: { max: deps.loginRateLimitPerMinute, timeWindow: "1 minute" },
+      },
+    },
+    async (request, reply) => {
+      const parsed = activateSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply
+          .status(400)
+          .send({ error: { code: "VALIDATION", message: "Dados invalidos." } });
+      }
+      try {
+        await deps.users.activate(
+          parsed.data.tenantId,
+          parsed.data.activationToken,
+          parsed.data.password,
+        );
+        return reply.status(204).send();
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
 
   // --- Gestao de usuarios (protegida) ---
+
+  fastify.post(
+    "/users/me/change-password",
+    { preHandler: fastify.authenticate },
+    async (request, reply) => {
+      const parsed = changePasswordSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply
+          .status(400)
+          .send({ error: { code: "VALIDATION", message: "Dados invalidos." } });
+      }
+      try {
+        await deps.users.changeOwnPassword(
+          requireContext(request),
+          parsed.data.currentPassword,
+          parsed.data.newPassword,
+        );
+        return reply.status(204).send();
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
 
   fastify.post(
     "/users/invite",
@@ -187,7 +228,12 @@ export async function registerRoutes(
           role: parsed.data.role,
           unitId: parsed.data.unitId ?? null,
         });
-        return reply.status(201).send({ id: user.id, status: user.status });
+        return reply.status(201).send({
+          id: user.id,
+          status: user.status,
+          activationToken: user.activationToken,
+          activationExpiresAt: user.activationExpiresAt.toISOString(),
+        });
       } catch (error) {
         return sendError(reply, error);
       }
@@ -262,6 +308,8 @@ export async function registerRoutes(
           id: result.tenant.id,
           name: result.tenant.name,
           ownerUserId: result.ownerUserId,
+          ownerActivationToken: result.ownerActivationToken,
+          ownerActivationExpiresAt: result.ownerActivationExpiresAt.toISOString(),
         });
       } catch (error) {
         return sendError(reply, error);
@@ -273,9 +321,16 @@ export async function registerRoutes(
     "/tenants",
     { preHandler: fastify.authenticate },
     async (request, reply) => {
+      const pagination = paginationSchema.safeParse(request.query);
+      if (!pagination.success) {
+        return reply
+          .status(400)
+          .send({ error: { code: "VALIDATION", message: "Dados invalidos." } });
+      }
       try {
-        const tenants = await deps.network.listTenants(requireContext(request));
-        return reply.send({ tenants });
+        return reply.send(
+          await deps.network.listTenants(requireContext(request), pagination.data),
+        );
       } catch (error) {
         return sendError(reply, error);
       }
@@ -316,9 +371,16 @@ export async function registerRoutes(
   });
 
   fastify.get("/units", { preHandler: fastify.authenticate }, async (request, reply) => {
+    const pagination = paginationSchema.safeParse(request.query);
+    if (!pagination.success) {
+      return reply
+        .status(400)
+        .send({ error: { code: "VALIDATION", message: "Dados invalidos." } });
+    }
     try {
-      const units = await deps.network.listUnits(requireContext(request));
-      return reply.send({ units });
+      return reply.send(
+        await deps.network.listUnits(requireContext(request), pagination.data),
+      );
     } catch (error) {
       return sendError(reply, error);
     }
@@ -348,9 +410,16 @@ export async function registerRoutes(
   );
 
   fastify.get("/users", { preHandler: fastify.authenticate }, async (request, reply) => {
+    const pagination = paginationSchema.safeParse(request.query);
+    if (!pagination.success) {
+      return reply
+        .status(400)
+        .send({ error: { code: "VALIDATION", message: "Dados invalidos." } });
+    }
     try {
-      const users = await deps.network.listUsers(requireContext(request));
-      return reply.send({ users });
+      return reply.send(
+        await deps.network.listUsers(requireContext(request), pagination.data),
+      );
     } catch (error) {
       return sendError(reply, error);
     }

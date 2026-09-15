@@ -22,6 +22,7 @@ import type {
   ReminderRepository,
 } from "../domain/repositories.js";
 import type { AuditService } from "./audit-service.js";
+import { reminderScheduledEvent, type EventPublisher } from "./event-publisher.js";
 
 export interface ScheduleReminderInput {
   readonly appointmentId: AppointmentId;
@@ -34,6 +35,7 @@ export interface ReminderServiceDeps {
   readonly appointments: AppointmentRepository;
   readonly audit: AuditService;
   readonly authorization: AuthorizationService;
+  readonly events: EventPublisher;
 }
 
 export class ReminderService {
@@ -50,6 +52,12 @@ export class ReminderService {
     if (!appointment) {
       throw new NotFoundError("Agendamento nao encontrado.");
     }
+    this.deps.authorization.ensureUnit(
+      actor,
+      "appointment:manage",
+      actor.tenantId,
+      appointment.unitId,
+    );
 
     const reminder = await this.deps.reminders.create({
       tenantId: actor.tenantId,
@@ -65,6 +73,14 @@ export class ReminderService {
       resourceType: "reminder",
       resourceId: reminder.id,
     });
+    await this.deps.events.publish(
+      reminderScheduledEvent(actor.tenantId, {
+        reminderId: reminder.id,
+        appointmentId: reminder.appointmentId,
+        channel: reminder.channel,
+        scheduledFor: reminder.scheduledFor.toISOString(),
+      }),
+    );
 
     return reminder;
   }

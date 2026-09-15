@@ -2,10 +2,9 @@
  * Servicos de API por dominio para os apps mobile, sobre o ApiClient.
  *
  * - AuthApi: autenticacao (identity-access).
- * - PatientSelfApi: operacoes do proprio paciente (patient-record). Hoje o
- *   backend expoe a leitura do prontuario por id; endpoints "meus" dedicados
- *   (ex.: minhas consultas) serao adicionados quando o produto do paciente
- *   evoluir. Mantemos o contrato honesto com o que existe.
+ * - PatientSelfApi: operacoes do proprio paciente (patient-record), sempre
+ *   resolvidas a partir da identidade autenticada. O app nunca recebe nem
+ *   escolhe o id de outro prontuario.
  * - ClinicalApi: operacoes do profissional em consulta (patient-record +
  *   smart-scheduling): registrar evolucao (append-only), listar prontuario,
  *   agendar e mudar status de agendamento.
@@ -54,15 +53,15 @@ export class AuthApi {
 export class PatientSelfApi {
   constructor(private readonly client: ApiClient) {}
 
-  /** Le o proprio prontuario/cadastro por id (o backend isola por tenant). */
-  async getMyRecord(patientId: string): Promise<Patient> {
-    return this.client.request<Patient>(`/patients/${patientId}`);
+  /** Le o proprio prontuario/cadastro a partir do usuario autenticado. */
+  async getMyRecord(): Promise<Patient> {
+    return this.client.request<Patient>("/patients/me");
   }
 
   /** Lista as evolucoes do proprio prontuario. */
-  async listMyClinicalRecords(patientId: string): Promise<readonly ClinicalRecord[]> {
+  async listMyClinicalRecords(): Promise<readonly ClinicalRecord[]> {
     const res = await this.client.request<{ records: ClinicalRecord[] }>(
-      `/patients/${patientId}/clinical-records`,
+      "/patients/me/clinical-records",
     );
     return res.records;
   }

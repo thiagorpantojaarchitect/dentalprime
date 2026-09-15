@@ -9,7 +9,15 @@ import { useCallback, useEffect, useState } from "react";
 import { ApiError } from "../api/client.js";
 import type { NetworkUser } from "../api/types.js";
 import { useServices } from "../api/use-services.js";
-import { EmptyState, ErrorBanner, PageHeader, StatusBadge } from "../ui/components.js";
+import {
+  EmptyState,
+  ErrorBanner,
+  PageHeader,
+  Pagination,
+  StatusBadge,
+} from "../ui/components.js";
+
+const PAGE_SIZE = 10;
 
 function usersError(err: unknown, fallback: string): string {
   if (err instanceof ApiError) {
@@ -31,21 +39,28 @@ export function UsersPage(): JSX.Element {
   const [users, setUsers] = useState<readonly NetworkUser[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
 
-  const load = useCallback(async (): Promise<void> => {
-    setError(null);
-    try {
-      setUsers(await network.listUsers());
-    } catch (err) {
-      setError(usersError(err, "Não foi possível carregar os usuários."));
-    } finally {
-      setLoaded(true);
-    }
-  }, [network]);
+  const load = useCallback(
+    async (requestedPage: number): Promise<void> => {
+      setError(null);
+      try {
+        const result = await network.listUsers(requestedPage, PAGE_SIZE);
+        setUsers(result.items);
+        setHasMore(result.hasMore);
+      } catch (err) {
+        setError(usersError(err, "Não foi possível carregar os usuários."));
+      } finally {
+        setLoaded(true);
+      }
+    },
+    [network],
+  );
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    void load(page);
+  }, [load, page]);
 
   return (
     <section>
@@ -79,6 +94,7 @@ export function UsersPage(): JSX.Element {
             </tbody>
           </table>
         )}
+        <Pagination page={page} hasMore={hasMore} onPageChange={setPage} />
       </div>
     </section>
   );

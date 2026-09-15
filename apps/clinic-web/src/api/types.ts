@@ -29,6 +29,8 @@ export type Role =
 export interface CreatedUser {
   readonly id: string;
   readonly status: string;
+  readonly activationToken: string;
+  readonly activationExpiresAt: string;
 }
 
 // --- patient-record ---
@@ -39,6 +41,7 @@ export interface CreatedPatient {
 
 export interface Patient {
   readonly id: string;
+  readonly portalUserId?: string | null;
   readonly fullName: string;
   readonly cpf: string;
   readonly birthDate?: string | null;
@@ -95,6 +98,45 @@ export interface OdontogramEntry {
 export interface CreatedAppointment {
   readonly id: string;
   readonly status: string;
+}
+
+export interface SchedulingProvider {
+  readonly id: string;
+  readonly unitId: string;
+  readonly userId: string;
+  readonly displayName: string;
+}
+
+export interface SchedulingResource {
+  readonly id: string;
+  readonly unitId: string;
+  readonly name: string;
+  readonly kind: string;
+}
+
+export type AvailabilityKind = "available" | "block";
+
+export interface CreatedAvailability {
+  readonly id: string;
+}
+
+export type AppointmentStatus =
+  | "booked"
+  | "confirmed"
+  | "attended"
+  | "no_show"
+  | "cancelled";
+
+export interface SchedulingDashboard {
+  readonly from: string;
+  readonly to: string;
+  readonly byStatus: readonly {
+    readonly status: AppointmentStatus;
+    readonly count: number;
+  }[];
+  readonly total: number;
+  readonly noShowRate: number | null;
+  readonly attendanceRate: number | null;
 }
 
 // --- treatment-plan ---
@@ -185,6 +227,21 @@ export interface ReconciliationResult {
   readonly differenceCents: number;
 }
 
+export type InvoiceStatus = "open" | "partially_paid" | "paid" | "cancelled";
+
+export interface FinanceDashboard {
+  readonly byStatus: readonly {
+    readonly status: InvoiceStatus;
+    readonly count: number;
+    readonly amountCents: number;
+    readonly balanceCents: number;
+  }[];
+  readonly totalInvoices: number;
+  readonly billedCents: number;
+  readonly receivedCents: number;
+  readonly outstandingCents: number;
+}
+
 // --- crm-growth ---
 
 export type CrmChannel = "phone" | "email" | "whatsapp" | "in_person";
@@ -211,6 +268,17 @@ export interface CreatedCampaign {
 export interface ConsentDecision {
   readonly id: string;
   readonly decision: string;
+}
+
+export type LeadStatus = "new" | "contacted" | "qualified" | "converted" | "lost";
+
+export interface CrmDashboard {
+  readonly funnel: readonly {
+    readonly status: LeadStatus;
+    readonly count: number;
+  }[];
+  readonly totalLeads: number;
+  readonly conversionRate: number | null;
 }
 
 // --- ai-front-desk ---

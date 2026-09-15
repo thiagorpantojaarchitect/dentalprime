@@ -23,12 +23,13 @@ async function main(): Promise<void> {
   ]);
 
   const config = loadConfig();
-  const composition = composeProduction(config);
+  const composition = await composeProduction(config);
   const app = await buildApp(composition);
 
   const shutdown = async (): Promise<void> => {
     await app.close();
     await composition.connection.pool.end();
+    await composition.rateLimitRedis?.quit();
     await telemetry.shutdown();
   };
   process.on("SIGTERM", () => void shutdown());

@@ -64,5 +64,7 @@ export function composeProduction(config: Config): Composition {
     segments,
     consent,
     dashboard,
+    trustProxy: config.trustProxy,
+    readinessCheck: connection.checkReady,
   };
 }

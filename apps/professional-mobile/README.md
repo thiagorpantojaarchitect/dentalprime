@@ -12,20 +12,23 @@ backend via `@dentalprime/mobile-core`.
 - A UI nativa **exige um device ou simulador** para rodar; não é executável
   neste ambiente de desenvolvimento sem o toolchain do Expo instalado.
 
-## Fora do workspace npm da raiz
+## Workspace e instalação
 
-Este app **não** faz parte dos workspaces npm do monorepo (Expo SDK 57 /
-React 19, enquanto as apps web usam React 18). É instalado e executado de forma
-independente para evitar conflito de versões de React.
+Este app faz parte dos workspaces npm do monorepo. O npm mantém a versão React
+19 exigida pelo Expo separada da React 18 dos portais web quando necessário.
+Instale tudo uma única vez na raiz com `npm ci`.
 
 ## Como rodar (requer device/simulador)
 
 ```bash
-cd apps/professional-mobile
-npm install
-npx expo start
+npm run start --workspace @dentalprime/professional-mobile
 # pressione i (iOS), a (Android) ou use o Expo Go em um device
 ```
+
+Para consumir uma API publicada, defina `EXPO_PUBLIC_API_BASE_URL`; o
+`app.config.js` compõe os caminhos públicos `/api/<domínio>`. Para Android
+emulator ou device físico local, informe os overrides `EXPO_PUBLIC_*_URL` com
+um host acessível. Nenhuma dessas variáveis públicas pode conter segredos.
 
 ## Segurança clínica
 

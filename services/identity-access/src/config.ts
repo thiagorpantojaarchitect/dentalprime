@@ -11,20 +11,66 @@
 
 import { z } from "zod";
 
-const configSchema = z.object({
-  nodeEnv: z.enum(["development", "test", "production"]).default("development"),
-  port: z.coerce.number().int().positive().default(3001),
-  databaseUrl: z.string().min(1, "DATABASE_URL e obrigatoria"),
-  // Segredo de assinatura dos JWT. Minimo de 32 bytes para HS256.
-  jwtSecret: z.string().min(32, "JWT_SECRET deve ter ao menos 32 caracteres"),
-  accessTokenTtlSeconds: z.coerce.number().int().positive().default(900),
-  refreshTokenTtlSeconds: z.coerce
-    .number()
-    .int()
-    .positive()
-    .default(60 * 60 * 24 * 14),
-  loginRateLimitPerMinute: z.coerce.number().int().positive().default(10),
-});
+const configSchema = z
+  .object({
+    nodeEnv: z.enum(["development", "test", "production"]).default("development"),
+    port: z.coerce.number().int().positive().default(3001),
+    databaseUrl: z.string().min(1, "DATABASE_URL e obrigatoria"),
+    // Segredo de assinatura dos JWT. Minimo de 32 bytes para HS256.
+    jwtSecret: z.string().min(32, "JWT_SECRET deve ter ao menos 32 caracteres"),
+    accessTokenTtlSeconds: z.coerce.number().int().positive().default(900),
+    refreshTokenTtlSeconds: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(60 * 60 * 24 * 14),
+    loginRateLimitPerMinute: z.coerce.number().int().positive().default(10),
+    invitationTtlSeconds: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(60 * 60 * 72),
+    trustProxy: z.coerce.number().int().min(0).max(2).default(0),
+    redisUrl: z
+      .string()
+      .url()
+      .refine(
+        (value) => value.startsWith("redis://") || value.startsWith("rediss://"),
+        "REDIS_URL deve usar o protocolo redis ou rediss",
+      )
+      .optional(),
+    redisAuthToken: z.string().min(1).optional(),
+  })
+  .superRefine((config, context) => {
+    if (config.nodeEnv === "production" && config.trustProxy !== 2) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["trustProxy"],
+        message: "TRUST_PROXY deve ser 2 em producao (CloudFront + ALB)",
+      });
+    }
+    if (config.nodeEnv === "production" && !config.redisUrl) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["redisUrl"],
+        message: "REDIS_URL e obrigatoria em producao",
+      });
+    }
+    if (config.nodeEnv === "production" && config.redisUrl?.startsWith("redis://")) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["redisUrl"],
+        message: "REDIS_URL deve usar TLS (rediss) em producao",
+      });
+    }
+    if (config.redisAuthToken && !config.redisUrl) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["redisAuthToken"],
+        message: "REDIS_AUTH_TOKEN requer REDIS_URL",
+      });
+    }
+  });
 
 export type Config = z.infer<typeof configSchema>;
 
@@ -42,6 +88,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     accessTokenTtlSeconds: env.ACCESS_TOKEN_TTL_SECONDS,
     refreshTokenTtlSeconds: env.REFRESH_TOKEN_TTL_SECONDS,
     loginRateLimitPerMinute: env.LOGIN_RATE_LIMIT_PER_MINUTE,
+    invitationTtlSeconds: env.INVITATION_TTL_SECONDS,
+    trustProxy: env.TRUST_PROXY,
+    redisUrl: env.REDIS_URL,
+    redisAuthToken: env.REDIS_AUTH_TOKEN,
   });
 
   if (!parsed.success) {

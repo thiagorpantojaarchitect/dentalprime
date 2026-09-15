@@ -11,7 +11,7 @@
  * - Requer `appointment:read`.
  */
 
-import type { TenantContext } from "@dentalprime/core";
+import type { ClinicUnitId, TenantContext } from "@dentalprime/core";
 
 import { AuthorizationService } from "../domain/authorization.js";
 import { ValidationError } from "../domain/errors.js";
@@ -67,8 +67,18 @@ export class DashboardService {
     actor: TenantContext,
     from: Date,
     to: Date,
+    unitId?: ClinicUnitId,
   ): Promise<SchedulingDashboard> {
-    this.deps.authorization.ensure(actor, "appointment:read", actor.tenantId);
+    if (unitId) {
+      this.deps.authorization.ensureUnit(
+        actor,
+        "appointment:read",
+        actor.tenantId,
+        unitId,
+      );
+    } else {
+      this.deps.authorization.ensure(actor, "appointment:read", actor.tenantId);
+    }
 
     if (
       Number.isNaN(from.getTime()) ||
@@ -82,6 +92,7 @@ export class DashboardService {
       actor.tenantId,
       from,
       to,
+      unitId ? [unitId] : actor.units.length > 0 ? actor.units : undefined,
     );
     const map = new Map(summary.map((s) => [s.status, s.count]));
 
@@ -102,7 +113,7 @@ export class DashboardService {
       actorUserId: actor.userId,
       action: "scheduling.dashboard_viewed",
       resourceType: "scheduling_dashboard",
-      resourceId: null,
+      resourceId: unitId ?? null,
     });
 
     return {

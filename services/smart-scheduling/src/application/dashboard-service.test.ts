@@ -1,7 +1,14 @@
 import { describe, it, expect, beforeEach } from "vitest";
 
 import { ForbiddenError, ValidationError } from "../domain/errors.js";
-import { buildEnv, makeContext, seedProvider, UNIT_A } from "./test-helpers.js";
+import {
+  buildEnv,
+  makeContext,
+  seedProvider,
+  TENANT_A,
+  UNIT_A,
+  UNIT_B,
+} from "./test-helpers.js";
 
 const actor = makeContext();
 const PATIENT = "99999999-9999-9999-9999-999999999999";
@@ -110,5 +117,26 @@ describe("DashboardService.schedulingSummary", () => {
     await expect(
       env.dashboard.schedulingSummary(makeContext({ roles: [] }), from, to),
     ).rejects.toBeInstanceOf(ForbiddenError);
+  });
+
+  it("filtra por unidade explicita ou pelas unidades do ator", async () => {
+    await book(env, providerId, 9);
+    const providerB = await seedProvider(env, TENANT_A, true, UNIT_B);
+    await env.scheduling.book(actor, {
+      patientId: PATIENT,
+      providerId: providerB,
+      unitId: UNIT_B,
+      startsAt: new Date("2026-03-10T09:00:00.000Z"),
+      endsAt: new Date("2026-03-10T09:30:00.000Z"),
+    });
+    const actorA = makeContext({ units: [UNIT_A] });
+
+    expect((await env.dashboard.schedulingSummary(actorA, from, to, UNIT_A)).total).toBe(
+      1,
+    );
+    await expect(
+      env.dashboard.schedulingSummary(actorA, from, to, UNIT_B),
+    ).rejects.toBeInstanceOf(ForbiddenError);
+    expect((await env.dashboard.schedulingSummary(actorA, from, to)).total).toBe(1);
   });
 });

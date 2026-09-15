@@ -87,6 +87,41 @@ export function EmptyState({ message }: { readonly message: string }): JSX.Eleme
   return <p className="empty">{message}</p>;
 }
 
+/** Paginacao server-side. `page` segue o contrato HTTP e comeca em 1. */
+export function Pagination({
+  page,
+  hasMore,
+  onPageChange,
+}: {
+  readonly page: number;
+  readonly hasMore: boolean;
+  readonly onPageChange: (page: number) => void;
+}): JSX.Element | null {
+  if (page === 1 && !hasMore) return null;
+
+  return (
+    <nav className="pagination" aria-label="Paginação">
+      <button
+        type="button"
+        className="secondary"
+        disabled={page === 1}
+        onClick={() => onPageChange(page - 1)}
+      >
+        Anterior
+      </button>
+      <span aria-live="polite">Página {page}</span>
+      <button
+        type="button"
+        className="secondary"
+        disabled={!hasMore}
+        onClick={() => onPageChange(page + 1)}
+      >
+        Próxima
+      </button>
+    </nav>
+  );
+}
+
 /** Formulario em cartao com titulo e handler de submit assincrono. */
 export function CardForm({
   title,

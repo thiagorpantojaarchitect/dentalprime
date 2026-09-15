@@ -21,6 +21,7 @@ export function AppLayout(): JSX.Element {
           <NavLink to="/unidades">Unidades</NavLink>
           <NavLink to="/usuarios">Usuários</NavLink>
           <NavLink to="/tenants">Tenants</NavLink>
+          <NavLink to="/seguranca">Segurança</NavLink>
         </nav>
       </aside>
       <main className="content">

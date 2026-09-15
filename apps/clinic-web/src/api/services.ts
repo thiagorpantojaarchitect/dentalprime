@@ -17,6 +17,7 @@ import type {
   ConsentResult,
   ConvertedLead,
   CreatedAppointment,
+  CreatedAvailability,
   CreatedCampaign,
   CreatedClinicalRecord,
   CreatedConversation,
@@ -30,7 +31,9 @@ import type {
   CreatedProcedure,
   CreatedUser,
   CrmChannel,
+  CrmDashboard,
   DecisionResult,
+  FinanceDashboard,
   Installment,
   MessageReply,
   OdontogramEntry,
@@ -43,6 +46,9 @@ import type {
   Procedure,
   ReconciliationResult,
   Role,
+  SchedulingProvider,
+  SchedulingResource,
+  SchedulingDashboard,
   SchedulingSuggestion,
   StatusResult,
   TokenPair,
@@ -77,6 +83,18 @@ export class AuthApi {
       public: true,
     });
   }
+
+  async activate(
+    tenantId: string,
+    activationToken: string,
+    password: string,
+  ): Promise<void> {
+    await this.client.request<void>("/users/activate", {
+      method: "POST",
+      body: { tenantId, activationToken, password },
+      public: true,
+    });
+  }
 }
 
 /** API de gestao de usuarios e papeis (identity-access). */
@@ -103,6 +121,13 @@ export class UserApi {
     await this.client.request<void>(`/users/${userId}/role`, {
       method: "POST",
       body: { role, unitId },
+    });
+  }
+
+  async changeOwnPassword(currentPassword: string, newPassword: string): Promise<void> {
+    await this.client.request<void>("/users/me/change-password", {
+      method: "POST",
+      body: { currentPassword, newPassword },
     });
   }
 }
@@ -134,6 +159,17 @@ export class PatientApi {
       method: "PATCH",
       body: changes,
     });
+  }
+
+  /** Associa uma conta com papel patient ao cadastro clínico correspondente. */
+  async linkPortalUser(
+    patientId: string,
+    portalUserId: string,
+  ): Promise<{ readonly patientId: string; readonly portalUserId: string }> {
+    return this.client.request<{ patientId: string; portalUserId: string }>(
+      `/patients/${patientId}/portal-user`,
+      { method: "PUT", body: { portalUserId } },
+    );
   }
 
   // --- Consentimento ---
@@ -253,10 +289,61 @@ export class PatientApi {
 export class SchedulingApi {
   constructor(private readonly client: ApiClient) {}
 
+  async createProvider(input: {
+    unitId: string;
+    userId: string;
+    displayName: string;
+  }): Promise<SchedulingProvider> {
+    return this.client.request<SchedulingProvider>("/providers", {
+      method: "POST",
+      body: input,
+    });
+  }
+
+  async listProviders(unitId: string): Promise<readonly SchedulingProvider[]> {
+    const response = await this.client.request<{ providers: SchedulingProvider[] }>(
+      `/providers?unitId=${encodeURIComponent(unitId)}`,
+    );
+    return response.providers;
+  }
+
+  async createResource(input: {
+    unitId: string;
+    name: string;
+    kind: string;
+  }): Promise<SchedulingResource> {
+    return this.client.request<SchedulingResource>("/resources", {
+      method: "POST",
+      body: input,
+    });
+  }
+
+  async listResources(unitId: string): Promise<readonly SchedulingResource[]> {
+    const response = await this.client.request<{ resources: SchedulingResource[] }>(
+      `/resources?unitId=${encodeURIComponent(unitId)}`,
+    );
+    return response.resources;
+  }
+
+  async addAvailability(input: {
+    providerId: string;
+    unitId: string;
+    resourceId?: string | null;
+    kind: "available" | "block";
+    startsAt: string;
+    endsAt: string;
+  }): Promise<CreatedAvailability> {
+    return this.client.request<CreatedAvailability>("/availability", {
+      method: "POST",
+      body: input,
+    });
+  }
+
   async book(input: {
     patientId: string;
     providerId: string;
     unitId: string;
+    resourceId?: string | null;
     startsAt: string;
     endsAt: string;
     allowOverbooking?: boolean;
@@ -275,6 +362,12 @@ export class SchedulingApi {
       method: "POST",
       body: { status },
     });
+  }
+
+  async dashboard(from: Date, to: Date): Promise<SchedulingDashboard> {
+    return this.client.request<SchedulingDashboard>(
+      `/dashboard?from=${from.toISOString()}&to=${to.toISOString()}`,
+    );
   }
 }
 
@@ -444,6 +537,10 @@ export class FinanceApi {
       body: input,
     });
   }
+
+  async dashboard(): Promise<FinanceDashboard> {
+    return this.client.request<FinanceDashboard>("/dashboard");
+  }
 }
 
 /** API de CRM e crescimento (crm-growth). */
@@ -522,6 +619,10 @@ export class CrmApi {
       method: "POST",
       body: { contactRef, purpose, channel },
     });
+  }
+
+  async dashboard(): Promise<CrmDashboard> {
+    return this.client.request<CrmDashboard>("/dashboard");
   }
 }
 

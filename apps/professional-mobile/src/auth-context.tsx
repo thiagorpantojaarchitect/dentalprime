@@ -40,12 +40,16 @@ export function AuthProvider({
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
   const sessionRef = useRef<Session | null>(null);
+  const refreshPromiseRef = useRef<Promise<string | null> | null>(null);
+  const sessionGenerationRef = useRef(0);
   sessionRef.current = session;
 
   useEffect(() => {
     let active = true;
     void store.load().then((loaded) => {
       if (active) {
+        sessionGenerationRef.current += 1;
+        sessionRef.current = loaded;
         setSession(loaded);
         setLoading(false);
       }
@@ -66,14 +70,20 @@ export function AuthProvider({
     async (tenantId: string, email: string, password: string): Promise<void> => {
       const pair = await authApi.login(tenantId, email, password);
       const next: Session = { tenantId, email, ...pair };
+      const generation = ++sessionGenerationRef.current;
+      sessionRef.current = next;
       await store.save(next);
-      setSession(next);
+      if (sessionGenerationRef.current === generation) setSession(next);
     },
     [authApi],
   );
 
   const logout = useCallback(async (): Promise<void> => {
     const current = sessionRef.current;
+    sessionGenerationRef.current += 1;
+    sessionRef.current = null;
+    setSession(null);
+    await store.clear();
     if (current) {
       try {
         await authApi.logout(current.tenantId, current.refreshToken);
@@ -81,24 +91,52 @@ export function AuthProvider({
         // Falha remota nao impede encerrar a sessao local.
       }
     }
-    await store.clear();
-    setSession(null);
   }, [authApi]);
 
-  const refresh = useCallback(async (): Promise<string | null> => {
+  const refresh = useCallback((): Promise<string | null> => {
+    if (refreshPromiseRef.current) return refreshPromiseRef.current;
     const current = sessionRef.current;
-    if (!current) return null;
-    try {
-      const pair = await authApi.refresh(current.tenantId, current.refreshToken);
-      const next: Session = { ...current, ...pair };
-      await store.save(next);
-      setSession(next);
-      return next.accessToken;
-    } catch {
-      await store.clear();
-      setSession(null);
-      return null;
-    }
+    if (!current) return Promise.resolve(null);
+    const generation = sessionGenerationRef.current;
+
+    const inFlight = (async (): Promise<string | null> => {
+      try {
+        const pair = await authApi.refresh(current.tenantId, current.refreshToken);
+        if (
+          sessionGenerationRef.current !== generation ||
+          sessionRef.current?.refreshToken !== current.refreshToken
+        ) {
+          return null;
+        }
+        const next: Session = { ...current, ...pair };
+        await store.save(next);
+        if (sessionGenerationRef.current !== generation) {
+          if (sessionRef.current) await store.save(sessionRef.current);
+          else await store.clear();
+          return null;
+        }
+        sessionRef.current = next;
+        setSession(next);
+        return next.accessToken;
+      } catch {
+        if (
+          sessionGenerationRef.current === generation &&
+          sessionRef.current?.refreshToken === current.refreshToken
+        ) {
+          sessionGenerationRef.current += 1;
+          sessionRef.current = null;
+          setSession(null);
+          await store.clear();
+        }
+        return null;
+      }
+    })();
+
+    refreshPromiseRef.current = inFlight;
+    void inFlight.finally(() => {
+      if (refreshPromiseRef.current === inFlight) refreshPromiseRef.current = null;
+    });
+    return inFlight;
   }, [authApi]);
 
   const clientFor = useCallback(

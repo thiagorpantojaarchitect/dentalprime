@@ -1,3 +1,7 @@
+CREATE SCHEMA IF NOT EXISTS "ai_front_desk";
+--> statement-breakpoint
+SET search_path TO "ai_front_desk", public;
+--> statement-breakpoint
 CREATE TABLE "ai_action_log" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"tenant_id" uuid NOT NULL,

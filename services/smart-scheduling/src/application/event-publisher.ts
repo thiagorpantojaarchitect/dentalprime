@@ -34,10 +34,25 @@ export interface AppointmentEventPayload {
   readonly startsAt: string;
 }
 
+export interface ReminderScheduledPayload {
+  readonly reminderId: string;
+  readonly appointmentId: string;
+  readonly channel: string;
+  readonly scheduledFor: string;
+}
+
+export function reminderScheduledEvent(
+  tenantId: TenantId,
+  payload: ReminderScheduledPayload,
+): DomainEvent<"ReminderScheduled", ReminderScheduledPayload> {
+  return createDomainEvent({ type: "ReminderScheduled", version: 1, tenantId, payload });
+}
+
 /** Cria um evento de agenda versionado (versao 1). */
 export function appointmentEvent(
   type:
     | "AppointmentBooked"
+    | "AppointmentRescheduled"
     | "AppointmentConfirmed"
     | "AppointmentCancelled"
     | "AppointmentNoShow",

@@ -15,6 +15,7 @@ import { ForbiddenError } from "./errors.js";
 export type Action = "treatment:read" | "treatment:manage" | "treatment:accept";
 
 const ROLE_PERMISSIONS: Readonly<Record<Role, readonly Action[]>> = {
+  "platform-admin": [],
   owner: ["treatment:read", "treatment:manage", "treatment:accept"],
   manager: ["treatment:read", "treatment:manage", "treatment:accept"],
   dentist: ["treatment:read", "treatment:manage", "treatment:accept"],

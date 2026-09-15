@@ -13,6 +13,7 @@ import type { TenantId } from "@dentalprime/core";
 
 import { InvalidCredentialsError, UnauthenticatedError } from "../domain/errors.js";
 import type {
+  IdentityUnitOfWork,
   RoleRepository,
   SessionRepository,
   UserRepository,
@@ -20,6 +21,11 @@ import type {
 import type { AuditService } from "./audit-service.js";
 import type { PasswordHasher } from "./password.js";
 import type { AccessTokenClaims, TokenService } from "./tokens.js";
+
+// Hash Argon2id valido e nao secreto usado para equalizar o caminho de login
+// quando usuario/senha ainda nao existe. Nunca corresponde a uma conta real.
+const DUMMY_PASSWORD_HASH =
+  "$argon2id$v=19$m=65536,t=3,p=4$tR4+onpspg2XDZIc8Njifw$xrwsiNEGxN0mi/H6WUE0vAamkXmNIdHxuhJ64WVellk";
 
 export interface LoginInput {
   readonly tenantId: TenantId;
@@ -42,6 +48,7 @@ export interface AuthDeps {
   readonly tokens: TokenService;
   readonly audit: AuditService;
   readonly refreshTtlSeconds: number;
+  readonly unitOfWork: IdentityUnitOfWork;
 }
 
 export class AuthService {
@@ -53,14 +60,15 @@ export class AuthService {
    * tentativa.
    */
   async login(input: LoginInput): Promise<TokenPair> {
-    const user = await this.deps.users.findByEmail(input.tenantId, input.email);
+    const user = await this.deps.users.findByEmail(
+      input.tenantId,
+      input.email.trim().toLowerCase(),
+    );
 
-    // Usuario inexistente, sem senha definida ou inativo: falha generica.
-    // Ainda assim verificamos a senha (quando possivel) para nao vazar timing.
-    const storedHash = user?.passwordHash ?? null;
-    const passwordOk = storedHash
-      ? await this.deps.passwords.verify(storedHash, input.password)
-      : false;
+    // Usuario inexistente, sem senha definida ou inativo: falha generica. Um
+    // hash Argon2id dummy mantem o mesmo caminho caro e reduz enumeracao por timing.
+    const storedHash = user?.passwordHash ?? DUMMY_PASSWORD_HASH;
+    const passwordOk = await this.deps.passwords.verify(storedHash, input.password);
 
     if (!user || user.status !== "active" || !passwordOk) {
       await this.deps.audit.record({
@@ -73,24 +81,27 @@ export class AuthService {
       throw new InvalidCredentialsError();
     }
 
-    const claims = await this.buildClaims(input.tenantId, user.id);
-    const pair = await this.issueTokens(
-      claims,
-      input.tenantId,
-      user.id,
-      input.userAgent ?? null,
-      input.ipAddress ?? null,
-    );
-
-    await this.deps.audit.record({
-      tenantId: input.tenantId,
-      actorUserId: user.id,
-      action: "auth.login.success",
-      resourceType: "session",
-      ipAddress: input.ipAddress ?? null,
+    return this.deps.unitOfWork.run(async (repositories) => {
+      const claims = await this.buildClaims(input.tenantId, user.id, repositories.roles);
+      const pair = await this.issueTokens(
+        claims,
+        input.tenantId,
+        user.id,
+        input.userAgent ?? null,
+        input.ipAddress ?? null,
+        repositories.sessions,
+      );
+      await repositories.audit.append({
+        tenantId: input.tenantId,
+        actorUserId: user.id,
+        action: "auth.login.success",
+        resourceType: "session",
+        resourceId: null,
+        metadata: null,
+        ipAddress: input.ipAddress ?? null,
+      });
+      return pair;
     });
-
-    return pair;
   }
 
   /**
@@ -104,50 +115,77 @@ export class AuthService {
     meta?: { userAgent?: string | null; ipAddress?: string | null },
   ): Promise<TokenPair> {
     const hash = this.deps.tokens.hashRefreshToken(refreshToken);
-    const session = await this.deps.sessions.findActiveByHash(tenantId, hash);
-    if (!session) {
-      throw new UnauthenticatedError("Sessao invalida ou expirada.");
-    }
+    const result = await this.deps.unitOfWork.run(async (repositories) => {
+      const session = await repositories.sessions.consumeActiveByHash(
+        tenantId,
+        hash,
+        new Date(),
+      );
+      if (!session) return { status: "invalid" as const };
 
-    const user = await this.deps.users.findById(tenantId, session.userId);
-    if (!user || user.status !== "active") {
-      await this.deps.sessions.revoke(tenantId, session.id);
-      throw new UnauthenticatedError("Sessao invalida.");
-    }
+      const user = await repositories.users.findById(tenantId, session.userId);
+      if (!user || user.status !== "active") {
+        // O consumo da sessao e confirmado, mesmo para uma conta desativada.
+        return { status: "inactive" as const };
+      }
 
-    // Rotaciona: revoga a sessao atual e emite uma nova.
-    await this.deps.sessions.revoke(tenantId, session.id);
-    const claims = await this.buildClaims(tenantId, user.id);
-    return this.issueTokens(
-      claims,
-      tenantId,
-      user.id,
-      meta?.userAgent ?? null,
-      meta?.ipAddress ?? null,
-    );
+      const claims = await this.buildClaims(tenantId, user.id, repositories.roles);
+      const pair = await this.issueTokens(
+        claims,
+        tenantId,
+        user.id,
+        meta?.userAgent ?? null,
+        meta?.ipAddress ?? null,
+        repositories.sessions,
+      );
+      await repositories.audit.append({
+        tenantId,
+        actorUserId: user.id,
+        action: "auth.refresh.rotated",
+        resourceType: "session",
+        resourceId: session.id,
+        metadata: null,
+        ipAddress: meta?.ipAddress ?? null,
+      });
+      return { status: "ok" as const, pair };
+    });
+
+    if (result.status !== "ok") {
+      throw new UnauthenticatedError(
+        result.status === "invalid" ? "Sessao invalida ou expirada." : "Sessao invalida.",
+      );
+    }
+    return result.pair;
   }
 
   /** Encerra uma sessao a partir do refresh token. */
   async logout(tenantId: TenantId, refreshToken: string): Promise<void> {
     const hash = this.deps.tokens.hashRefreshToken(refreshToken);
-    const session = await this.deps.sessions.findActiveByHash(tenantId, hash);
-    if (session) {
-      await this.deps.sessions.revoke(tenantId, session.id);
-      await this.deps.audit.record({
+    await this.deps.unitOfWork.run(async (repositories) => {
+      const session = await repositories.sessions.consumeActiveByHash(
+        tenantId,
+        hash,
+        new Date(),
+      );
+      if (!session) return;
+      await repositories.audit.append({
         tenantId,
         actorUserId: session.userId,
         action: "auth.logout",
         resourceType: "session",
         resourceId: session.id,
+        metadata: null,
+        ipAddress: null,
       });
-    }
+    });
   }
 
   private async buildClaims(
     tenantId: TenantId,
     userId: string,
+    rolesRepository: RoleRepository,
   ): Promise<AccessTokenClaims> {
-    const assignments = await this.deps.roles.listForUser(tenantId, userId);
+    const assignments = await rolesRepository.listForUser(tenantId, userId);
     const roles = [...new Set(assignments.map((a) => a.role))];
     const units = [
       ...new Set(assignments.map((a) => a.unitId).filter((u): u is string => u !== null)),
@@ -161,11 +199,12 @@ export class AuthService {
     userId: string,
     userAgent: string | null,
     ipAddress: string | null,
+    sessionsRepository: SessionRepository,
   ): Promise<TokenPair> {
     const accessToken = await this.deps.tokens.issueAccessToken(claims);
     const refresh = this.deps.tokens.generateRefreshToken();
     const expiresAt = new Date(Date.now() + this.deps.refreshTtlSeconds * 1000);
-    await this.deps.sessions.create({
+    await sessionsRepository.create({
       tenantId,
       userId,
       refreshTokenHash: refresh.hash,

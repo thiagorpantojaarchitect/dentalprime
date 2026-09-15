@@ -9,6 +9,8 @@ export type PatientId = string;
 export interface Patient {
   readonly id: PatientId;
   readonly tenantId: TenantId;
+  /** Usuario do identity-access autorizado a usar o portal deste paciente. */
+  readonly portalUserId: UserId | null;
   readonly fullName: string;
   readonly cpf: string;
   readonly birthDate: string | null;
@@ -62,6 +64,19 @@ export interface OdontogramEntry {
   readonly condition: string;
   readonly critical: boolean;
   readonly authorUserId: UserId;
+  readonly createdAt: Date;
+}
+
+export interface ClinicalDocument {
+  readonly id: string;
+  readonly tenantId: TenantId;
+  readonly patientId: PatientId;
+  readonly kind: string;
+  readonly fileName: string;
+  readonly contentType: string;
+  readonly storageKey: string;
+  readonly sizeBytes: number;
+  readonly uploadedBy: UserId;
   readonly createdAt: Date;
 }
 

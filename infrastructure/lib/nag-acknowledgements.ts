@@ -3,8 +3,8 @@
  *
  * Cada item aqui e uma decisao consciente desta fase de fundacao, com
  * justificativa. Reconhecer NAO e ignorar: documenta por que a regra nao se
- * aplica agora ou sera atendida em iteracao futura (ex.: logs de acesso e
- * certificado ACM proprio quando houver dominio). Regras de seguranca que
+ * aplica ao desenho atual ou depende de uma configuracao externa (ex. dominio
+ * e certificado ACM). Regras de seguranca que
  * podemos atender ja foram corrigidas no codigo (flow logs, IAM auth no RDS,
  * criptografia, block public access, etc.).
  *
@@ -36,22 +36,12 @@ const COMMON_ACKS: readonly Ack[] = [
   {
     id: "AwsSolutions-S1",
     reason:
-      "Logs de acesso de servidor S3 serao habilitados com um bucket de logs central dedicado em iteracao posterior. Auditoria de API ja e coberta pelo CloudTrail.",
-  },
-  {
-    id: "AwsSolutions-ELB2",
-    reason:
-      "Logs de acesso do ALB serao habilitados com bucket de logs dedicado em iteracao posterior; o CloudFront e a borda primaria.",
+      "Os buckets de dados, frontends e CloudTrail enviam access logs a sinks dedicados. O reconhecimento se aplica apenas aos proprios sinks, que nao podem registrar em si mesmos sem criar recursao infinita.",
   },
   {
     id: "AwsSolutions-ECS2",
     reason:
-      "As variaveis de ambiente da task sao apenas nao-sensiveis (NODE_ENV, PORT, DATABASE_HOST/PORT/NAME). Segredos (usuario, senha, JWT) sao injetados do Secrets Manager via 'secrets', nunca em texto plano.",
-  },
-  {
-    id: "AwsSolutions-CFR3",
-    reason:
-      "Logs de acesso do CloudFront serao habilitados com bucket de logs dedicado em iteracao posterior.",
+      "Variaveis da task contem somente configuracao nao sensivel (hosts, nomes, portas e flags). Credenciais, JWT e Redis AUTH sao injetados do Secrets Manager em runtime.",
   },
   {
     id: "AwsSolutions-CFR4",
@@ -61,7 +51,7 @@ const COMMON_ACKS: readonly Ack[] = [
   {
     id: "AwsSolutions-CFR5",
     reason:
-      "A origem /api/* usa HTTP para o ALB interno em VPC nesta fase; TLS de ponta a ponta ate a origem sera habilitado com certificado no ALB em iteracao posterior.",
+      "No development, CloudFront usa HTTP ate o ALB e autentica a origem com header secreto. O viewer usa HTTPS; TLS na origem depende do dominio e certificado ACM do ambiente compartilhado.",
   },
   {
     id: "AwsSolutions-CFR1",
@@ -69,19 +59,9 @@ const COMMON_ACKS: readonly Ack[] = [
       "Restricao geografica nao se aplica: o produto atende o mercado brasileiro e nao restringe por pais nesta fase.",
   },
   {
-    id: "AwsSolutions-COG8",
-    reason:
-      "O tier Plus do Cognito (recursos avancados de seguranca) sera avaliado quando houver volume; a fundacao usa senha forte e MFA (obrigatorio em producao).",
-  },
-  {
     id: "AwsSolutions-AEC5",
     reason:
       "Ofuscacao de porta do Redis sera avaliada em endurecimento posterior; o Redis fica em subnet isolada, sem acesso publico, com SG restrito.",
-  },
-  {
-    id: "AwsSolutions-AEC6",
-    reason:
-      "Redis AUTH sera habilitado com token no Secrets Manager em iteracao posterior; criptografia em repouso e em transito ja estao habilitadas e o acesso e restrito por SG em subnet isolada.",
   },
   {
     // Finding granular: Resource::* na policy da execution role. A acao
@@ -106,11 +86,6 @@ const NON_PROD_ACKS: readonly Ack[] = [
     id: "AwsSolutions-AEC4",
     reason:
       "Redis single-AZ fora de producao por custo. Em producao usa Multi-AZ com failover automatico.",
-  },
-  {
-    id: "AwsSolutions-COG2",
-    reason:
-      "MFA e opcional fora de producao para facilitar testes. Em producao e obrigatorio.",
   },
 ];
 

@@ -23,6 +23,20 @@ const availabilitySchema = z.object({
   endsAt: z.string().datetime(),
 });
 
+const providerSchema = z.object({
+  unitId: z.string().uuid(),
+  userId: z.string().uuid(),
+  displayName: z.string().trim().min(1).max(160),
+});
+
+const resourceSchema = z.object({
+  unitId: z.string().uuid(),
+  name: z.string().trim().min(1).max(160),
+  kind: z.string().trim().min(1).max(80),
+});
+
+const unitQuerySchema = z.object({ unitId: z.string().uuid() });
+
 const bookSchema = z.object({
   patientId: z.string().uuid(),
   providerId: z.string().uuid(),
@@ -62,6 +76,7 @@ const providerIdParam = z.object({ providerId: z.string().uuid() });
 const dashboardQuerySchema = z.object({
   from: z.string().datetime(),
   to: z.string().datetime(),
+  unitId: z.string().uuid().optional(),
 });
 
 const validationError = { error: { code: "VALIDATION", message: "Dados invalidos." } };
@@ -93,6 +108,7 @@ export async function registerRoutes(
           requireContext(request),
           new Date(query.data.from),
           new Date(query.data.to),
+          query.data.unitId,
         );
         return reply.send(summary);
       } catch (error) {
@@ -102,6 +118,102 @@ export async function registerRoutes(
   );
 
   // --- Disponibilidade ---
+
+  fastify.post(
+    "/providers",
+    { preHandler: fastify.authenticate },
+    async (request, reply) => {
+      const body = providerSchema.safeParse(request.body);
+      if (!body.success) return reply.status(400).send(validationError);
+      try {
+        const provider = await services.availability.createProvider(
+          requireContext(request),
+          body.data,
+        );
+        return reply.status(201).send({
+          id: provider.id,
+          unitId: provider.unitId,
+          userId: provider.userId,
+          displayName: provider.displayName,
+        });
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
+
+  fastify.get(
+    "/providers",
+    { preHandler: fastify.authenticate },
+    async (request, reply) => {
+      const query = unitQuerySchema.safeParse(request.query);
+      if (!query.success) return reply.status(400).send(validationError);
+      try {
+        const providers = await services.availability.listProviders(
+          requireContext(request),
+          query.data.unitId,
+        );
+        return reply.send({
+          providers: providers.map((provider) => ({
+            id: provider.id,
+            unitId: provider.unitId,
+            userId: provider.userId,
+            displayName: provider.displayName,
+          })),
+        });
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
+
+  fastify.post(
+    "/resources",
+    { preHandler: fastify.authenticate },
+    async (request, reply) => {
+      const body = resourceSchema.safeParse(request.body);
+      if (!body.success) return reply.status(400).send(validationError);
+      try {
+        const resource = await services.availability.createResource(
+          requireContext(request),
+          body.data,
+        );
+        return reply.status(201).send({
+          id: resource.id,
+          unitId: resource.unitId,
+          name: resource.name,
+          kind: resource.kind,
+        });
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
+
+  fastify.get(
+    "/resources",
+    { preHandler: fastify.authenticate },
+    async (request, reply) => {
+      const query = unitQuerySchema.safeParse(request.query);
+      if (!query.success) return reply.status(400).send(validationError);
+      try {
+        const resources = await services.availability.listResources(
+          requireContext(request),
+          query.data.unitId,
+        );
+        return reply.send({
+          resources: resources.map((resource) => ({
+            id: resource.id,
+            unitId: resource.unitId,
+            name: resource.name,
+            kind: resource.kind,
+          })),
+        });
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
 
   fastify.post(
     "/availability",

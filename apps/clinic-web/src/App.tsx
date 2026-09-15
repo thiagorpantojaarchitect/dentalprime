@@ -6,6 +6,7 @@ import { Route, Routes } from "react-router-dom";
 
 import { RequireAuth } from "./auth/RequireAuth.js";
 import { AiFrontDeskPage } from "./pages/AiFrontDeskPage.js";
+import { ActivationPage } from "./pages/ActivationPage.js";
 import { CrmPage } from "./pages/CrmPage.js";
 import { DashboardPage } from "./pages/DashboardPage.js";
 import { FinancePage } from "./pages/FinancePage.js";
@@ -13,6 +14,7 @@ import { LoginPage } from "./pages/LoginPage.js";
 import { PatientDetailPage } from "./pages/PatientDetailPage.js";
 import { PatientsPage } from "./pages/PatientsPage.js";
 import { SchedulePage } from "./pages/SchedulePage.js";
+import { SecurityPage } from "./pages/SecurityPage.js";
 import { TreatmentsPage } from "./pages/TreatmentsPage.js";
 import { UsersPage } from "./pages/UsersPage.js";
 import { AppLayout } from "./ui/AppLayout.js";
@@ -21,6 +23,7 @@ export function App(): JSX.Element {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/ativar" element={<ActivationPage />} />
       <Route
         element={
           <RequireAuth>
@@ -37,6 +40,7 @@ export function App(): JSX.Element {
         <Route path="/crm" element={<CrmPage />} />
         <Route path="/recepcao-ia" element={<AiFrontDeskPage />} />
         <Route path="/usuarios" element={<UsersPage />} />
+        <Route path="/seguranca" element={<SecurityPage />} />
       </Route>
     </Routes>
   );

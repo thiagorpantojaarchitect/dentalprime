@@ -16,6 +16,7 @@ import type {
   PatientId,
   Provider,
   ProviderId,
+  Resource,
   Reminder,
   ReminderChannel,
   ResourceId,
@@ -24,12 +25,24 @@ import type {
 
 export interface ProviderRepository {
   findById(tenantId: TenantId, providerId: ProviderId): Promise<Provider | null>;
+  listByUnit(tenantId: TenantId, unitId: ClinicUnitId): Promise<Provider[]>;
   create(input: {
     tenantId: TenantId;
     unitId: ClinicUnitId;
     userId: UserId;
     displayName: string;
   }): Promise<Provider>;
+}
+
+export interface ResourceRepository {
+  findById(tenantId: TenantId, resourceId: ResourceId): Promise<Resource | null>;
+  listByUnit(tenantId: TenantId, unitId: ClinicUnitId): Promise<Resource[]>;
+  create(input: {
+    tenantId: TenantId;
+    unitId: ClinicUnitId;
+    name: string;
+    kind: string;
+  }): Promise<Resource>;
 }
 
 export interface AvailabilityRepository {
@@ -45,6 +58,7 @@ export interface AvailabilityRepository {
   /** Janelas de um provider que interceptam o intervalo informado. */
   listForProviderInRange(
     tenantId: TenantId,
+    unitId: ClinicUnitId,
     providerId: ProviderId,
     startsAt: Date,
     endsAt: Date,
@@ -53,10 +67,22 @@ export interface AvailabilityRepository {
 
 export interface AppointmentRepository {
   findById(tenantId: TenantId, appointmentId: AppointmentId): Promise<Appointment | null>;
+  /** Le a linha bloqueando alteracoes concorrentes ate o fim da transacao atual. */
+  findByIdForUpdate(
+    tenantId: TenantId,
+    appointmentId: AppointmentId,
+  ): Promise<Appointment | null>;
   /** Agendamentos ativos (nao cancelados) de um provider no intervalo. */
   listActiveForProviderInRange(
     tenantId: TenantId,
     providerId: ProviderId,
+    startsAt: Date,
+    endsAt: Date,
+  ): Promise<Appointment[]>;
+  /** Agendamentos ativos de qualquer provider usando o recurso no intervalo. */
+  listActiveForResourceInRange(
+    tenantId: TenantId,
+    resourceId: ResourceId,
     startsAt: Date,
     endsAt: Date,
   ): Promise<Appointment[]>;
@@ -68,6 +94,7 @@ export interface AppointmentRepository {
     resourceId: ResourceId | null;
     startsAt: Date;
     endsAt: Date;
+    allowOverbooking: boolean;
     createdBy: UserId;
   }): Promise<Appointment>;
   updateSchedule(
@@ -75,6 +102,7 @@ export interface AppointmentRepository {
     appointmentId: AppointmentId,
     startsAt: Date,
     endsAt: Date,
+    allowOverbooking: boolean,
   ): Promise<Appointment>;
   updateStatus(
     tenantId: TenantId,
@@ -89,6 +117,7 @@ export interface AppointmentRepository {
     tenantId: TenantId,
     from: Date,
     to: Date,
+    unitIds?: readonly ClinicUnitId[],
   ): Promise<AppointmentStatusCount[]>;
 }
 
@@ -120,6 +149,7 @@ export interface StatusHistoryRepository {
 }
 
 export interface WaitlistRepository {
+  findById(tenantId: TenantId, entryId: string): Promise<WaitlistEntry | null>;
   add(input: {
     tenantId: TenantId;
     unitId: ClinicUnitId;
@@ -152,4 +182,21 @@ export interface ReminderRepository {
 
 export interface AuditRepository {
   append(entry: AuditEntry): Promise<void>;
+}
+
+/** Repositorios vinculados a uma mesma transacao de agenda. */
+export interface SchedulingTransactionRepositories {
+  readonly appointments: AppointmentRepository;
+  readonly statusHistory: StatusHistoryRepository;
+  readonly audit: AuditRepository;
+}
+
+/**
+ * Executa alteracoes de agendamento, historico e auditoria de forma atomica.
+ * Eventos externos sao publicados somente depois do commit.
+ */
+export interface SchedulingUnitOfWork {
+  run<T>(
+    operation: (repositories: SchedulingTransactionRepositories) => Promise<T>,
+  ): Promise<T>;
 }

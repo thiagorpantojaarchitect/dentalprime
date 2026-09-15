@@ -1,0 +1,511 @@
+name: ${COMPOSE_PROJECT_NAME:-dentalprime-development}
+
+x-backend-environment: &backend-environment
+  NODE_ENV: development
+  DEPLOYMENT_ENV: ${DEPLOYMENT_ENV:-development}
+  DATABASE_HOST: postgres
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: ${POSTGRES_DB:-dentalprime}
+  DATABASE_USERNAME: ${POSTGRES_USER:-dentalprime}
+  DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?copie .env.example para .env}
+  DATABASE_SSLMODE: verify-full
+  DATABASE_CA_CERT_PATH: /etc/dentalprime/tls/server.crt
+  JWT_SECRET: ${JWT_SECRET:?copie .env.example para .env}
+  # O Compose e um ambiente local: eventos externos ficam explicitamente desligados.
+  EVENT_PROVIDER: ${EVENT_PROVIDER:-noop}
+
+x-backend-runtime: &backend-runtime
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  volumes:
+    - postgres-tls:/etc/dentalprime/tls:ro
+  networks:
+    - backend
+  stop_grace_period: 30s
+
+x-migration-runtime: &migration-runtime
+  restart: "no"
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  volumes:
+    - postgres-tls:/etc/dentalprime/tls:ro
+  networks:
+    - backend
+
+services:
+  tls-certificates:
+    image: alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+    restart: "no"
+    user: root
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        apk add --no-cache openssl
+        if ! openssl x509 -checkend 86400 -noout -in /tls/server.crt >/dev/null 2>&1; then
+          rm -f /tls/server.crt /tls/server.key
+          openssl req -x509 -nodes -newkey rsa:2048 \
+            -keyout /tls/server.key \
+            -out /tls/server.crt \
+            -days 30 \
+            -subj /CN=postgres \
+            -addext subjectAltName=DNS:postgres
+        fi
+        chmod 600 /tls/server.key
+        chmod 644 /tls/server.crt
+        chown 70:70 /tls/server.key /tls/server.crt
+        printf 'local all all trust\nhostssl all all all scram-sha-256\nhostnossl all all all reject\n' > /tls/pg_hba.conf
+        chmod 644 /tls/pg_hba.conf
+        chown 70:70 /tls/pg_hba.conf
+    volumes:
+      - postgres-tls:/tls
+    networks:
+      - backend
+
+  postgres:
+    image: postgres:16.15-alpine3.24@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+    restart: unless-stopped
+    depends_on:
+      tls-certificates:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-dentalprime}
+      POSTGRES_USER: ${POSTGRES_USER:-dentalprime}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?copie .env.example para .env}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/tls/server.crt
+      - -c
+      - ssl_key_file=/tls/server.key
+      - -c
+      - hba_file=/tls/pg_hba.conf
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - postgres-tls:/tls:ro
+    networks:
+      - backend
+    stop_grace_period: 30s
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    command: server /data --console-address :9001
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?copie .env.example para .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?copie .env.example para .env}
+      # A edicao comunitaria fixada usa CORS global do servidor. Restrinja aos
+      # dois portais locais; o bucket continua privado e exige URLs assinadas.
+      MINIO_API_CORS_ALLOW_ORIGIN: http://localhost:5173,http://localhost:5174
+    ports:
+      - "127.0.0.1:${MINIO_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - minio-data:/data
+    networks:
+      - backend
+    stop_grace_period: 30s
+
+  minio-init:
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+    restart: "no"
+    depends_on:
+      minio: { condition: service_started }
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?copie .env.example para .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?copie .env.example para .env}
+      CLINICAL_DOCUMENTS_BUCKET: ${CLINICAL_DOCUMENTS_BUCKET:-dentalprime-clinical-documents-development}
+      MC_CONFIG_DIR: /tmp/mc
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        until mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"; do
+          sleep 1
+        done
+        mc mb --ignore-existing "local/$$CLINICAL_DOCUMENTS_BUCKET"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - backend
+
+  migrate-identity:
+    <<: *migration-runtime
+    image: dentalprime/identity-access:development
+    build:
+      context: .
+      args: { SERVICE: identity-access, PORT: "3001" }
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      <<: *backend-environment
+      DATABASE_SCHEMA: identity_access
+      RUN_MODE: migrate
+
+  identity-access:
+    <<: *backend-runtime
+    image: dentalprime/identity-access:development
+    build:
+      context: .
+      args: { SERVICE: identity-access, PORT: "3001" }
+    depends_on:
+      migrate-identity: { condition: service_completed_successfully }
+    environment:
+      <<: *backend-environment
+      DATABASE_SCHEMA: identity_access
+      ACCESS_TOKEN_TTL_SECONDS: "900"
+      REFRESH_TOKEN_TTL_SECONDS: "1209600"
+      LOGIN_RATE_LIMIT_PER_MINUTE: "30"
+    ports:
+      - "127.0.0.1:${IDENTITY_PORT:-3001}:3001"
+
+  migrate-patient:
+    <<: *migration-runtime
+    image: dentalprime/patient-record:development
+    build:
+      context: .
+      args: { SERVICE: patient-record, PORT: "3002" }
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      <<: *backend-environment
+      DATABASE_SCHEMA: patient_record
+      RUN_MODE: migrate
+
+  patient-record:
+    <<: *backend-runtime
+    image: dentalprime/patient-record:development
+    build:
+      context: .
+      args: { SERVICE: patient-record, PORT: "3002" }
+    depends_on:
+      migrate-patient: { condition: service_completed_successfully }
+      minio-init: { condition: service_completed_successfully }
+    environment:
+      <<: *backend-environment
+      DATABASE_SCHEMA: patient_record
+      CLINICAL_DOCUMENTS_BUCKET: ${CLINICAL_DOCUMENTS_BUCKET:-dentalprime-clinical-documents-development}
+      CLINICAL_DOCUMENTS_ENDPOINT: http://localhost:${MINIO_PORT:-9000}
+      CLINICAL_DOCUMENTS_FORCE_PATH_STYLE: "true"
+      AWS_REGION: sa-east-1
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?copie .env.example para .env}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?copie .env.example para .env}
+      AWS_EC2_METADATA_DISABLED: "true"
+    ports:
+      - "127.0.0.1:${PATIENT_PORT:-3002}:3002"
+
+  migrate-scheduling:
+    <<: *migration-runtime
+    image: dentalprime/smart-scheduling:development
+    build:
+      context: .
+      args: { SERVICE: smart-scheduling, PORT: "3003" }
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      <<: *backend-environment
+      DATABASE_SCHEMA: smart_scheduling
+      RUN_MODE: migrate
+
+  smart-scheduling:
+    <<: *backend-runtime
+    image: dentalprime/smart-scheduling:development
+    build:
+      context: .
+      args: { SERVICE: smart-scheduling, PORT: "3003" }
+    depends_on:
+      migrate-scheduling: { condition: service_completed_successfully }
+    environment:
+      <<: *backend-environment
+      DATABASE_SCHEMA: smart_scheduling
+    ports:
+      - "127.0.0.1:${SCHEDULING_PORT:-3003}:3003"
+
+  migrate-treatment:
+    <<: *migration-runtime
+    image: dentalprime/treatment-plan:development
+    build:
+      context: .
+      args: { SERVICE: treatment-plan, PORT: "3004" }
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      <<: *backend-environment
+      DATABASE_SCHEMA: treatment_plan
+      RUN_MODE: migrate
+
+  treatment-plan:
+    <<: *backend-runtime
+    image: dentalprime/treatment-plan:development
+    build:
+      context: .
+      args: { SERVICE: treatment-plan, PORT: "3004" }
+    depends_on:
+      migrate-treatment: { condition: service_completed_successfully }
+    environment:
+      <<: *backend-environment
+      DATABASE_SCHEMA: treatment_plan
+    ports:
+      - "127.0.0.1:${TREATMENT_PORT:-3004}:3004"
+
+  migrate-finance:
+    <<: *migration-runtime
+    image: dentalprime/finance:development
+    build:
+      context: .
+      args: { SERVICE: finance, PORT: "3005" }
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      <<: *backend-environment
+      DATABASE_SCHEMA: finance
+      RUN_MODE: migrate
+
+  finance:
+    <<: *backend-runtime
+    image: dentalprime/finance:development
+    build:
+      context: .
+      args: { SERVICE: finance, PORT: "3005" }
+    depends_on:
+      migrate-finance: { condition: service_completed_successfully }
+    environment:
+      <<: *backend-environment
+      DATABASE_SCHEMA: finance
+      DEFAULT_CURRENCY: BRL
+    ports:
+      - "127.0.0.1:${FINANCE_PORT:-3005}:3005"
+
+  migrate-crm:
+    <<: *migration-runtime
+    image: dentalprime/crm-growth:development
+    build:
+      context: .
+      args: { SERVICE: crm-growth, PORT: "3006" }
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      <<: *backend-environment
+      DATABASE_SCHEMA: crm_growth
+      RUN_MODE: migrate
+
+  crm-growth:
+    <<: *backend-runtime
+    image: dentalprime/crm-growth:development
+    build:
+      context: .
+      args: { SERVICE: crm-growth, PORT: "3006" }
+    depends_on:
+      migrate-crm: { condition: service_completed_successfully }
+    environment:
+      <<: *backend-environment
+      DATABASE_SCHEMA: crm_growth
+    ports:
+      - "127.0.0.1:${CRM_PORT:-3006}:3006"
+
+  migrate-ai:
+    <<: *migration-runtime
+    image: dentalprime/ai-front-desk:development
+    build:
+      context: .
+      args: { SERVICE: ai-front-desk, PORT: "3007" }
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      <<: *backend-environment
+      DATABASE_SCHEMA: ai_front_desk
+      AI_PROVIDER: ${AI_PROVIDER:-stub}
+      RUN_MODE: migrate
+
+  ai-front-desk:
+    <<: *backend-runtime
+    image: dentalprime/ai-front-desk:development
+    build:
+      context: .
+      args: { SERVICE: ai-front-desk, PORT: "3007" }
+    depends_on:
+      migrate-ai: { condition: service_completed_successfully }
+    environment:
+      <<: *backend-environment
+      DATABASE_SCHEMA: ai_front_desk
+      AI_PROVIDER: ${AI_PROVIDER:-stub}
+    ports:
+      - "127.0.0.1:${AI_PORT:-3007}:3007"
+
+  bootstrap:
+    profiles: [bootstrap]
+    image: dentalprime/identity-access:development
+    depends_on:
+      migrate-identity: { condition: service_completed_successfully }
+    environment:
+      <<: *backend-environment
+      DATABASE_SCHEMA: identity_access
+      RUN_MODE: bootstrap
+      ALLOW_DEVELOPMENT_BOOTSTRAP: "true"
+      BOOTSTRAP_TENANT_NAME: ${BOOTSTRAP_TENANT_NAME:-Clinica de Desenvolvimento}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@example.invalid}
+      BOOTSTRAP_ADMIN_NAME: ${BOOTSTRAP_ADMIN_NAME:-Administrador Local}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?defina no arquivo .env}
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - postgres-tls:/etc/dentalprime/tls:ro
+    networks:
+      - backend
+
+  smoke:
+    profiles: [smoke]
+    image: dentalprime/identity-access:development
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        for endpoint in \
+          http://identity-access:3001/ready \
+          http://patient-record:3002/ready \
+          http://smart-scheduling:3003/ready \
+          http://treatment-plan:3004/ready \
+          http://finance:3005/ready \
+          http://crm-growth:3006/ready \
+          http://ai-front-desk:3007/ready
+        do
+          wget --no-verbose --tries=3 --spider "$$endpoint"
+        done
+        echo "Os sete servicos responderam ao smoke HTTP."
+    depends_on:
+      smoke-storage: { condition: service_completed_successfully }
+      identity-access: { condition: service_healthy }
+      patient-record: { condition: service_healthy }
+      smart-scheduling: { condition: service_healthy }
+      treatment-plan: { condition: service_healthy }
+      finance: { condition: service_healthy }
+      crm-growth: { condition: service_healthy }
+      ai-front-desk: { condition: service_healthy }
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - backend
+
+  smoke-storage:
+    profiles: [smoke]
+    image: dentalprime/patient-record:development
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        node --input-type=module <<'NODE'
+        import {
+          DeleteObjectCommand,
+          GetObjectCommand,
+          PutObjectCommand,
+          S3Client,
+        } from "@aws-sdk/client-s3";
+        import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+
+        const client = new S3Client({
+          region: "sa-east-1",
+          endpoint: "http://minio:9000",
+          forcePathStyle: true,
+          requestChecksumCalculation: "WHEN_REQUIRED",
+        });
+        const bucket = process.env.CLINICAL_DOCUMENTS_BUCKET;
+        const key = "synthetic/smoke-document.txt";
+        const body = Buffer.from("dentalprime synthetic storage smoke\n");
+        const headers = {
+          "content-type": "application/pdf",
+          "content-length": String(body.length),
+        };
+        const uploadUrl = await getSignedUrl(
+          client,
+          new PutObjectCommand({
+            Bucket: bucket,
+            Key: key,
+            ContentType: headers["content-type"],
+            ContentLength: body.length,
+          }),
+          {
+            expiresIn: 60,
+            signableHeaders: new Set(["content-length", "content-type"]),
+          },
+        );
+        const upload = await fetch(uploadUrl, { method: "PUT", headers, body });
+        if (!upload.ok) throw new Error("storage PUT failed: " + upload.status);
+
+        const downloadUrl = await getSignedUrl(
+          client,
+          new GetObjectCommand({ Bucket: bucket, Key: key }),
+          { expiresIn: 60 },
+        );
+        const download = await fetch(downloadUrl);
+        if (!download.ok || (await download.text()) !== body.toString()) {
+          throw new Error("storage GET failed");
+        }
+        await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+        console.log("Upload e download pre-assinados no storage local passaram.");
+        NODE
+    depends_on:
+      minio-init: { condition: service_completed_successfully }
+    environment:
+      CLINICAL_DOCUMENTS_BUCKET: ${CLINICAL_DOCUMENTS_BUCKET:-dentalprime-clinical-documents-development}
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?copie .env.example para .env}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?copie .env.example para .env}
+      AWS_EC2_METADATA_DISABLED: "true"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - backend
+
+volumes:
+  postgres-data:
+  postgres-tls:
+  minio-data:
+
+networks:
+  backend:
+    driver: bridge

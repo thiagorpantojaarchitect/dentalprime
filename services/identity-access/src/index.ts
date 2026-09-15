@@ -6,8 +6,13 @@ export { AuthService } from "./application/auth-service.js";
 export { AuthorizationService, type Scope } from "./application/authorization-service.js";
 export { AuditService } from "./application/audit-service.js";
 export { UserService } from "./application/user-service.js";
+export { DevelopmentBootstrapService } from "./application/development-bootstrap.js";
 export { JoseTokenService, type TokenService } from "./application/tokens.js";
 export { argon2Hasher, type PasswordHasher } from "./application/password.js";
+export {
+  secureInvitationTokens,
+  type InvitationTokenService,
+} from "./application/invitation-token.js";
 
 export type { Action } from "./domain/permissions.js";
 export * from "./domain/errors.js";

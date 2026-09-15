@@ -22,8 +22,8 @@ function networkError(err: unknown, fallback: string): string {
 export function OverviewPage(): JSX.Element {
   const { network } = useServices();
   const [tenant, setTenant] = useState<Tenant | null>(null);
-  const [unitCount, setUnitCount] = useState<number | null>(null);
-  const [userCount, setUserCount] = useState<number | null>(null);
+  const [unitCount, setUnitCount] = useState<string | null>(null);
+  const [userCount, setUserCount] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
@@ -35,8 +35,8 @@ export function OverviewPage(): JSX.Element {
         network.listUsers(),
       ]);
       setTenant(t);
-      setUnitCount(units.length);
-      setUserCount(users.length);
+      setUnitCount(`${units.items.length}${units.hasMore ? "+" : ""}`);
+      setUserCount(`${users.items.length}${users.hasMore ? "+" : ""}`);
     } catch (err) {
       setError(networkError(err, "Não foi possível carregar a visão geral."));
     }

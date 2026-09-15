@@ -2,6 +2,8 @@
  * Composicao das dependencias de producao do treatment-plan.
  */
 
+import { AwsEventBridgePublisher } from "@dentalprime/core";
+
 import { AcceptanceService } from "./application/acceptance-service.js";
 import { AuditService } from "./application/audit-service.js";
 import {
@@ -27,9 +29,26 @@ export interface Composition extends AppDeps {
   readonly connection: DbConnection;
 }
 
+function configuredEventPublisher(config: Config): EventPublisher {
+  if (config.eventProvider === "noop") {
+    if (config.deploymentEnv !== "development") {
+      throw new Error("NoopEventPublisher e permitido somente em development.");
+    }
+    return new NoopEventPublisher();
+  }
+  if (!config.eventBusName) {
+    throw new Error("EVENT_BUS_NAME e obrigatoria para EventBridge.");
+  }
+  return new AwsEventBridgePublisher({
+    eventBusName: config.eventBusName,
+    region: config.awsRegion,
+    source: "dentalprime.treatment-plan",
+  });
+}
+
 export function composeProduction(
   config: Config,
-  eventPublisher: EventPublisher = new NoopEventPublisher(),
+  eventPublisher?: EventPublisher,
 ): Composition {
   const connection = createDbConnection(config.databaseUrl);
   const db = connection.db;
@@ -42,6 +61,7 @@ export function composeProduction(
 
   const audit = new AuditService(auditRepo);
   const authorization = new AuthorizationService();
+  const events = eventPublisher ?? configuredEventPublisher(config);
 
   const procedures = new ProcedureCatalogService({
     procedures: procedureRepo,
@@ -51,7 +71,7 @@ export function composeProduction(
   const plans = new TreatmentPlanService({
     plans: planRepo,
     audit,
-    events: eventPublisher,
+    events,
     authorization,
   });
   const items = new PlanItemService({
@@ -59,7 +79,7 @@ export function composeProduction(
     plans: planRepo,
     procedures: procedureRepo,
     audit,
-    events: eventPublisher,
+    events,
     authorization,
   });
   const acceptance = new AcceptanceService({
@@ -67,7 +87,7 @@ export function composeProduction(
     items: itemRepo,
     plans: planRepo,
     audit,
-    events: eventPublisher,
+    events,
     authorization,
   });
 
@@ -78,5 +98,7 @@ export function composeProduction(
     plans,
     items,
     acceptance,
+    trustProxy: config.trustProxy,
+    readinessCheck: connection.checkReady,
   };
 }

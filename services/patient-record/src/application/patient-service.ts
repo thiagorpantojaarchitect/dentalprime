@@ -8,7 +8,7 @@
  * Ver `.kiro/specs/patient-record/requirements.md` (Requisito 1).
  */
 
-import type { TenantContext } from "@dentalprime/core";
+import type { TenantContext, UserId } from "@dentalprime/core";
 
 import { AuthorizationService } from "../domain/authorization.js";
 import { isValidCpf, normalizeCpf } from "../domain/cpf.js";
@@ -98,6 +98,68 @@ export class PatientService {
       resourceId: patient.id,
     });
     return patient;
+  }
+
+  /**
+   * Resolve o cadastro do proprio paciente pelo sub do JWT. A permissao
+   * self-read nao concede acesso por patientId e o repositorio combina tenant
+   * e portalUserId, evitando IDOR entre pacientes ou tenants.
+   */
+  async getOwnProfile(actor: TenantContext): Promise<Patient> {
+    this.deps.authorization.ensure(actor, "patient:self-read", actor.tenantId);
+    const patient = await this.deps.patients.findByPortalUserId(
+      actor.tenantId,
+      actor.userId,
+    );
+    if (!patient?.active) {
+      throw new NotFoundError("Cadastro de paciente nao vinculado.");
+    }
+    await this.deps.audit.record({
+      tenantId: actor.tenantId,
+      actorUserId: actor.userId,
+      action: "patient.self_accessed",
+      resourceType: "patient",
+      resourceId: patient.id,
+    });
+    return patient;
+  }
+
+  /** Vincula, de forma auditada, um usuario do portal ao cadastro do paciente. */
+  async linkPortalUser(
+    actor: TenantContext,
+    patientId: PatientId,
+    portalUserId: UserId,
+  ): Promise<Patient> {
+    this.deps.authorization.ensure(actor, "patient:manage", actor.tenantId);
+
+    const patient = await this.deps.patients.findById(actor.tenantId, patientId);
+    if (!patient) {
+      throw new NotFoundError("Paciente nao encontrado.");
+    }
+    const linked = await this.deps.patients.findByPortalUserId(
+      actor.tenantId,
+      portalUserId,
+    );
+    if (linked && linked.id !== patientId) {
+      throw new ConflictError("Usuario do portal ja vinculado a outro paciente.");
+    }
+    if (patient.portalUserId === portalUserId) return patient;
+
+    const updated = await this.deps.patients.linkPortalUser(
+      actor.tenantId,
+      patientId,
+      portalUserId,
+      actor.userId,
+    );
+    await this.deps.audit.record({
+      tenantId: actor.tenantId,
+      actorUserId: actor.userId,
+      action: "patient.portal_user_linked",
+      resourceType: "patient",
+      resourceId: patientId,
+      metadata: { replacedExistingLink: patient.portalUserId !== null },
+    });
+    return updated;
   }
 
   /** Atualiza dados cadastrais. Requer patient:manage. Auditado. */

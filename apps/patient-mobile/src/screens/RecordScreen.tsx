@@ -2,13 +2,12 @@
  * Meu prontuario: o paciente consulta seu cadastro e as evolucoes clinicas
  * (somente leitura). Consome patient-record via mobile-core.
  *
- * Nota de produto: endpoints dedicados "meus dados" (sem informar o id) serao
- * adicionados quando o app do paciente evoluir; por ora o paciente informa o
- * proprio id de prontuario fornecido pela clinica.
+ * O backend associa o usuario autenticado ao cadastro do paciente; nenhum id
+ * de prontuario e aceito pela interface ou pela API de autoatendimento.
  */
 
 import { useState } from "react";
-import { ScrollView, Text, TextInput, TouchableOpacity, View } from "react-native";
+import { ScrollView, Text, TouchableOpacity, View } from "react-native";
 import {
   ApiError,
   PatientSelfApi,
@@ -22,22 +21,19 @@ import { styles } from "../styles";
 
 export function RecordScreen(): JSX.Element {
   const { clientFor } = useAuth();
-  const [patientId, setPatientId] = useState("");
   const [patient, setPatient] = useState<Patient | null>(null);
   const [records, setRecords] = useState<readonly ClinicalRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const load = async (): Promise<void> => {
-    const id = patientId.trim();
-    if (!id) return;
     setError(null);
     setLoading(true);
     try {
       const api = new PatientSelfApi(clientFor(getServiceUrls().patient));
       const [p, recs] = await Promise.all([
-        api.getMyRecord(id),
-        api.listMyClinicalRecords(id),
+        api.getMyRecord(),
+        api.listMyClinicalRecords(),
       ]);
       setPatient(p);
       setRecords(recs);
@@ -60,13 +56,10 @@ export function RecordScreen(): JSX.Element {
       <Text style={styles.subtitle}>Consulte seus dados e evoluções.</Text>
 
       <View style={styles.card}>
-        <Text style={styles.label}>Meu ID de prontuário</Text>
-        <TextInput
-          style={styles.input}
-          value={patientId}
-          onChangeText={setPatientId}
-          autoCapitalize="none"
-        />
+        <Text style={styles.muted}>
+          O acesso é vinculado à sua conta pela clínica. Você verá somente o seu próprio
+          prontuário.
+        </Text>
         {error ? <Text style={styles.error}>{error}</Text> : null}
         <TouchableOpacity
           style={[styles.button, loading ? styles.buttonDisabled : null]}
@@ -74,7 +67,9 @@ export function RecordScreen(): JSX.Element {
           disabled={loading}
           accessibilityRole="button"
         >
-          <Text style={styles.buttonText}>{loading ? "Carregando..." : "Carregar"}</Text>
+          <Text style={styles.buttonText}>
+            {loading ? "Carregando..." : "Carregar meu prontuário"}
+          </Text>
         </TouchableOpacity>
       </View>
 

@@ -4,10 +4,14 @@ import type { TenantContext } from "@dentalprime/core";
 import { NetworkService } from "./network-service.js";
 import { AuditService } from "./audit-service.js";
 import { AuthorizationService } from "./authorization-service.js";
+import { secureInvitationTokens } from "./invitation-token.js";
 import { ForbiddenError, NotFoundError } from "../domain/errors.js";
 import {
   InMemoryAuditRepository,
+  InMemoryIdentityUnitOfWork,
+  InMemoryInvitationRepository,
   InMemoryRoleRepository,
+  InMemorySessionRepository,
   InMemoryTenantRepository,
   InMemoryUnitRepository,
   InMemoryUserRepository,
@@ -21,13 +25,28 @@ function build() {
   const users = new InMemoryUserRepository();
   const roles = new InMemoryRoleRepository();
   const auditRepo = new InMemoryAuditRepository();
+  const invitations = new InMemoryInvitationRepository();
+  const sessions = new InMemorySessionRepository();
+  const unitOfWork = new InMemoryIdentityUnitOfWork({
+    users,
+    roles,
+    sessions,
+    invitations,
+    tenants,
+    units,
+    audit: auditRepo,
+  });
   const service = new NetworkService({
     tenants,
     units,
     users,
     roles,
+    invitations,
     audit: new AuditService(auditRepo),
     authorization: new AuthorizationService(),
+    invitationTokens: secureInvitationTokens,
+    invitationTtlSeconds: 3600,
+    unitOfWork,
   });
   return { service, tenants, units, users, roles, auditRepo };
 }
@@ -36,6 +55,13 @@ const owner: TenantContext = {
   tenantId: TENANT,
   userId: "owner-1",
   roles: ["owner"],
+  units: [],
+};
+
+const platformAdmin: TenantContext = {
+  tenantId: TENANT,
+  userId: "platform-admin-1",
+  roles: ["platform-admin"],
   units: [],
 };
 
@@ -52,8 +78,8 @@ describe("NetworkService.provisionTenant", () => {
     env = build();
   });
 
-  it("owner provisiona tenant, cria owner pendente e audita", async () => {
-    const result = await env.service.provisionTenant(owner, {
+  it("platform-admin provisiona tenant, cria owner pendente e audita", async () => {
+    const result = await env.service.provisionTenant(platformAdmin, {
       name: "Clinica Nova",
       ownerEmail: "dono@clinica.com",
       ownerName: "Dono",
@@ -63,6 +89,7 @@ describe("NetworkService.provisionTenant", () => {
 
     const created = await env.users.findById(result.tenant.id, result.ownerUserId);
     expect(created?.status).toBe("pending");
+    expect(result.ownerActivationToken.length).toBeGreaterThanOrEqual(32);
     const assignments = await env.roles.listForTenant(result.tenant.id);
     expect(assignments.map((a) => a.role)).toContain("owner");
     expect(env.auditRepo.entries.some((e) => e.action === "tenant.provisioned")).toBe(
@@ -70,14 +97,24 @@ describe("NetworkService.provisionTenant", () => {
     );
   });
 
-  it("nega provisionamento para papel sem tenant:manage", async () => {
+  it("nega provisionamento global para owner de clinica", async () => {
     await expect(
-      env.service.provisionTenant(frontDesk, {
+      env.service.provisionTenant(owner, {
         name: "X",
         ownerEmail: "x@x.com",
         ownerName: "X",
       }),
     ).rejects.toBeInstanceOf(ForbiddenError);
+  });
+
+  it("nega listagem global para owner de clinica", async () => {
+    await expect(env.service.listTenants(owner)).rejects.toBeInstanceOf(ForbiddenError);
+    await expect(env.service.listTenants(platformAdmin)).resolves.toEqual({
+      tenants: [],
+      page: 1,
+      pageSize: 50,
+      hasMore: false,
+    });
   });
 });
 
@@ -90,15 +127,18 @@ describe("NetworkService unidades", () => {
   it("cria e lista unidades do tenant do ator", async () => {
     await env.service.createUnit(owner, "Unidade Centro");
     await env.service.createUnit(owner, "Unidade Sul");
-    const units = await env.service.listUnits(owner);
-    expect(units.map((u) => u.name)).toEqual(["Unidade Centro", "Unidade Sul"]);
+    const result = await env.service.listUnits(owner);
+    expect(result.units.map((unit) => unit.name)).toEqual([
+      "Unidade Centro",
+      "Unidade Sul",
+    ]);
   });
 
   it("desativa unidade e audita", async () => {
     const unit = await env.service.createUnit(owner, "Unidade Centro");
     await env.service.setUnitActive(owner, unit.id, false);
-    const units = await env.service.listUnits(owner);
-    expect(units[0]?.active).toBe(false);
+    const result = await env.service.listUnits(owner);
+    expect(result.units[0]?.active).toBe(false);
     expect(env.auditRepo.entries.some((e) => e.action === "unit.deactivated")).toBe(true);
   });
 
@@ -112,6 +152,29 @@ describe("NetworkService unidades", () => {
     await expect(env.service.createUnit(frontDesk, "X")).rejects.toBeInstanceOf(
       ForbiddenError,
     );
+  });
+
+  it("pagina unidades com limite no servidor e indicador hasMore", async () => {
+    await env.service.createUnit(owner, "A");
+    await env.service.createUnit(owner, "B");
+    await env.service.createUnit(owner, "C");
+
+    await expect(
+      env.service.listUnits(owner, { page: 1, pageSize: 2 }),
+    ).resolves.toMatchObject({
+      units: [{ name: "A" }, { name: "B" }],
+      page: 1,
+      pageSize: 2,
+      hasMore: true,
+    });
+    await expect(
+      env.service.listUnits(owner, { page: 2, pageSize: 2 }),
+    ).resolves.toMatchObject({
+      units: [{ name: "C" }],
+      page: 2,
+      pageSize: 2,
+      hasMore: false,
+    });
   });
 });
 
@@ -131,12 +194,12 @@ describe("NetworkService.listUsers", () => {
     });
     await env.roles.assign(TENANT, user.id, "dentist", null);
 
-    const list = await env.service.listUsers(owner);
-    expect(list).toHaveLength(1);
-    expect(list[0]?.email).toBe("dentista@clinica.com");
-    expect(list[0]?.roles).toContain("dentist");
+    const result = await env.service.listUsers(owner);
+    expect(result.users).toHaveLength(1);
+    expect(result.users[0]?.email).toBe("dentista@clinica.com");
+    expect(result.users[0]?.roles).toContain("dentist");
     // Nao expoe passwordHash.
-    expect(JSON.stringify(list)).not.toContain("hash:");
+    expect(JSON.stringify(result)).not.toContain("hash:");
   });
 
   it("nega listagem sem user:read", async () => {

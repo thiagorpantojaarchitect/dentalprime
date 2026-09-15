@@ -25,10 +25,10 @@ Implementações disponíveis:
 | `bedrock` | `BedrockAIProvider` | Produção. Amazon Bedrock via **Converse API**. |
 
 A seleção é feita pela fábrica `createAIProvider(config)`
-(`src/application/ai-provider-factory.ts`), a partir de `AI_PROVIDER`. Se
-`AI_PROVIDER=bedrock` mas faltar `BEDROCK_MODEL_ID`, ou se a inicialização do
-adaptador falhar, o serviço faz **fallback seguro para o stub** e continua
-operando (a camada de IA nunca derruba o serviço).
+(`src/application/ai-provider-factory.ts`), a partir de `AI_PROVIDER`, que é
+obrigatório. `stub` só é aceito quando `DEPLOYMENT_ENV=development`. Se Bedrock
+for selecionado sem modelo ou a configuração estiver incompleta, o serviço
+falha fechado; nunca muda silenciosamente para outro provedor.
 
 ## Adaptador Bedrock
 
@@ -49,10 +49,15 @@ operando (a camada de IA nunca derruba o serviço).
 
 Configuração (variáveis de ambiente; ver `.env.example`):
 
-- `AI_PROVIDER` — `stub` (padrão) ou `bedrock`.
+- `AI_PROVIDER` — `stub` ou `bedrock` (obrigatório; sem padrão implícito).
+- `DEPLOYMENT_ENV` — `development`, `staging` ou `production`; somente o
+  primeiro aceita `stub`.
 - `BEDROCK_REGION` — padrão `sa-east-1` (dados no Brasil).
 - `BEDROCK_MODEL_ID` — id do modelo ou inference profile (obrigatório para
   `bedrock`).
+- `BEDROCK_GUARDRAIL_ID` e `BEDROCK_GUARDRAIL_VERSION` — opcionais tecnicamente,
+  mas obrigatórios antes de autorizar uso clínico real; devem ser informados em
+  conjunto.
 
 ## Guardrail de segurança clínica (antes da IA)
 
@@ -83,5 +88,5 @@ independente do adaptador.
   `triage` parseia JSON, isola JSON com texto ao redor, e cai no fallback
   conservador em parse inválido / erro; verifica `maxTokens`, `temperature` e a
   presença do system prompt não clínico. Nenhuma chamada real.
-- `ai-provider-factory.test.ts` — stub por padrão, bedrock quando configurado com
-  modelId, e fallback para stub quando falta modelId.
+- `ai-provider-factory.test.ts` — stub somente quando declarado em development,
+  Bedrock quando configurado com modelId e falha fechada quando falta modelId.

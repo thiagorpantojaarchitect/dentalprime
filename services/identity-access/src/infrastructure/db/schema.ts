@@ -83,6 +83,7 @@ export const roleAssignments = pgTable(
       .references(() => users.id),
     role: text("role", {
       enum: [
+        "platform-admin",
         "owner",
         "manager",
         "dentist",
@@ -121,6 +122,31 @@ export const sessions = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [index("session_user_idx").on(table.tenantId, table.userId)],
+);
+
+/** Convite de ativacao de uso unico. O token em claro nunca e persistido. */
+export const invitations = pgTable(
+  "invitation",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: uuid("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id),
+    tokenHash: text("token_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    createdByUserId: uuid("created_by_user_id")
+      .notNull()
+      .references(() => users.id),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("invitation_token_hash_idx").on(table.tokenHash),
+    index("invitation_tenant_user_idx").on(table.tenantId, table.userId),
+  ],
 );
 
 /**

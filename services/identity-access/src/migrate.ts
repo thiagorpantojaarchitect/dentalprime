@@ -13,10 +13,15 @@
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
+import { quotePostgresIdentifier } from "@dentalprime/core";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 
 import { loadConfig } from "./config.js";
-import { createDbConnection } from "./infrastructure/db/client.js";
+import {
+  createDbConnection,
+  DATABASE_SCHEMA,
+  MIGRATIONS_TABLE,
+} from "./infrastructure/db/client.js";
 
 const MIGRATIONS_FOLDER = resolve(dirname(fileURLToPath(import.meta.url)), "../drizzle");
 
@@ -24,7 +29,14 @@ async function runMigrations(): Promise<void> {
   const config = loadConfig();
   const { db, pool } = createDbConnection(config.databaseUrl);
   try {
-    await migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });
+    await pool.query(
+      `CREATE SCHEMA IF NOT EXISTS ${quotePostgresIdentifier(DATABASE_SCHEMA)}`,
+    );
+    await migrate(db, {
+      migrationsFolder: MIGRATIONS_FOLDER,
+      migrationsSchema: DATABASE_SCHEMA,
+      migrationsTable: MIGRATIONS_TABLE,
+    });
     console.log("Migracoes aplicadas com sucesso.");
   } finally {
     await pool.end();

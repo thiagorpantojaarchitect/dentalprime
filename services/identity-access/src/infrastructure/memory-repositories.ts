@@ -12,6 +12,7 @@ import { randomUUID } from "node:crypto";
 import type {
   AuditEntry,
   ClinicUnit,
+  Invitation,
   RoleAssignment,
   Session,
   Tenant,
@@ -21,6 +22,11 @@ import type {
 import type {
   AuditRepository,
   CreateUserInput,
+  InvitationRepository,
+  IdentityTransactionRepositories,
+  IdentityUnitOfWork,
+  IdentityUnitOfWorkOptions,
+  RepositoryPage,
   RoleRepository,
   SessionRepository,
   TenantRepository,
@@ -75,10 +81,36 @@ export class InMemoryUserRepository implements UserRepository {
     if (user) this.rows.set(userId, { ...user, passwordHash });
   }
 
-  async listByTenant(tenantId: TenantId): Promise<User[]> {
+  async activatePending(
+    tenantId: TenantId,
+    userId: UserId,
+    passwordHash: string,
+  ): Promise<boolean> {
+    const user = await this.findById(tenantId, userId);
+    if (!user || user.status !== "pending" || user.passwordHash !== null) return false;
+    this.rows.set(userId, { ...user, status: "active", passwordHash });
+    return true;
+  }
+
+  async setPasswordHashIfCurrent(
+    tenantId: TenantId,
+    userId: UserId,
+    expectedPasswordHash: string,
+    newPasswordHash: string,
+  ): Promise<boolean> {
+    const user = await this.findById(tenantId, userId);
+    if (!user || user.status !== "active" || user.passwordHash !== expectedPasswordHash) {
+      return false;
+    }
+    this.rows.set(userId, { ...user, passwordHash: newPasswordHash });
+    return true;
+  }
+
+  async listByTenant(tenantId: TenantId, page: RepositoryPage): Promise<User[]> {
     return [...this.rows.values()]
       .filter((u) => u.tenantId === tenantId)
-      .sort((a, b) => a.email.localeCompare(b.email));
+      .sort((a, b) => a.email.localeCompare(b.email) || a.id.localeCompare(b.id))
+      .slice(page.offset, page.offset + page.limit);
   }
 }
 
@@ -95,8 +127,10 @@ export class InMemoryTenantRepository implements TenantRepository {
     return this.rows.get(tenantId) ?? null;
   }
 
-  async list(): Promise<Tenant[]> {
-    return [...this.rows.values()].sort((a, b) => a.name.localeCompare(b.name));
+  async list(page: RepositoryPage): Promise<Tenant[]> {
+    return [...this.rows.values()]
+      .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
+      .slice(page.offset, page.offset + page.limit);
   }
 
   async setActive(tenantId: TenantId, active: boolean): Promise<void> {
@@ -124,10 +158,11 @@ export class InMemoryUnitRepository implements UnitRepository {
     return unit && unit.tenantId === tenantId ? unit : null;
   }
 
-  async listByTenant(tenantId: TenantId): Promise<ClinicUnit[]> {
+  async listByTenant(tenantId: TenantId, page: RepositoryPage): Promise<ClinicUnit[]> {
     return [...this.rows.values()]
       .filter((u) => u.tenantId === tenantId)
-      .sort((a, b) => a.name.localeCompare(b.name));
+      .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
+      .slice(page.offset, page.offset + page.limit);
   }
 
   async setActive(
@@ -149,6 +184,16 @@ export class InMemoryRoleRepository implements RoleRepository {
 
   async listForTenant(tenantId: TenantId): Promise<RoleAssignment[]> {
     return this.rows.filter((r) => r.tenantId === tenantId);
+  }
+
+  async listForUsers(
+    tenantId: TenantId,
+    userIds: readonly UserId[],
+  ): Promise<RoleAssignment[]> {
+    const selected = new Set(userIds);
+    return this.rows.filter(
+      (role) => role.tenantId === tenantId && selected.has(role.userId),
+    );
   }
 
   async assign(
@@ -209,6 +254,26 @@ export class InMemorySessionRepository implements SessionRepository {
     return null;
   }
 
+  async consumeActiveByHash(
+    tenantId: TenantId,
+    refreshTokenHash: string,
+    now: Date,
+  ): Promise<Session | null> {
+    for (const [id, session] of this.rows.entries()) {
+      if (
+        session.tenantId === tenantId &&
+        session.refreshTokenHash === refreshTokenHash &&
+        session.revokedAt === null &&
+        session.expiresAt.getTime() > now.getTime()
+      ) {
+        const consumed = { ...session, revokedAt: now };
+        this.rows.set(id, consumed);
+        return consumed;
+      }
+    }
+    return null;
+  }
+
   async revoke(tenantId: TenantId, sessionId: string): Promise<void> {
     const session = this.rows.get(sessionId);
     if (session && session.tenantId === tenantId) {
@@ -229,10 +294,82 @@ export class InMemorySessionRepository implements SessionRepository {
   }
 }
 
+export class InMemoryInvitationRepository implements InvitationRepository {
+  public readonly rows = new Map<string, Invitation>();
+
+  async create(input: {
+    tenantId: TenantId;
+    userId: UserId;
+    tokenHash: string;
+    expiresAt: Date;
+    createdByUserId: UserId;
+  }): Promise<Invitation> {
+    const invitation: Invitation = {
+      id: randomUUID(),
+      tenantId: input.tenantId,
+      userId: input.userId,
+      tokenHash: input.tokenHash,
+      expiresAt: input.expiresAt,
+      usedAt: null,
+      createdByUserId: input.createdByUserId,
+    };
+    this.rows.set(invitation.id, invitation);
+    return invitation;
+  }
+
+  async consumeActive(
+    tenantId: TenantId,
+    tokenHash: string,
+    now: Date,
+  ): Promise<Invitation | null> {
+    for (const [id, invitation] of this.rows) {
+      if (
+        invitation.tenantId === tenantId &&
+        invitation.tokenHash === tokenHash &&
+        invitation.usedAt === null &&
+        invitation.expiresAt.getTime() > now.getTime()
+      ) {
+        const consumed = { ...invitation, usedAt: now };
+        this.rows.set(id, consumed);
+        return consumed;
+      }
+    }
+    return null;
+  }
+}
+
 export class InMemoryAuditRepository implements AuditRepository {
   public readonly entries: AuditEntry[] = [];
 
   async append(entry: AuditEntry): Promise<void> {
     this.entries.push(entry);
+  }
+}
+
+/** Unit of work used by application tests and local in-memory compositions. */
+export class InMemoryIdentityUnitOfWork implements IdentityUnitOfWork {
+  private exclusiveTail: Promise<void> = Promise.resolve();
+
+  constructor(private readonly repositories: IdentityTransactionRepositories) {}
+
+  async run<T>(
+    operation: (repositories: IdentityTransactionRepositories) => Promise<T>,
+    options: IdentityUnitOfWorkOptions = {},
+  ): Promise<T> {
+    if (options.advisoryLockId === undefined) {
+      return operation(this.repositories);
+    }
+
+    const previous = this.exclusiveTail;
+    let release!: () => void;
+    this.exclusiveTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation(this.repositories);
+    } finally {
+      release();
+    }
   }
 }

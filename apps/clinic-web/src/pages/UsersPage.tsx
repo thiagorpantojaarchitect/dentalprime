@@ -39,7 +39,7 @@ function usersError(err: unknown, fallback: string): string {
 }
 
 export function UsersPage(): JSX.Element {
-  const { users } = useServices();
+  const { users, patients } = useServices();
 
   const [email, setEmail] = useState("");
   const [displayName, setDisplayName] = useState("");
@@ -52,10 +52,17 @@ export function UsersPage(): JSX.Element {
   const [manageMsg, setManageMsg] = useState<string | null>(null);
   const [manageError, setManageError] = useState<string | null>(null);
 
+  const [patientId, setPatientId] = useState("");
+  const [portalUserId, setPortalUserId] = useState("");
+  const [linkMsg, setLinkMsg] = useState<string | null>(null);
+  const [linkError, setLinkError] = useState<string | null>(null);
+
   const invite = async (): Promise<void> => {
     setInviteError(null);
     try {
-      setInvited(await users.invite({ email, displayName, role: role as Role }));
+      const created = await users.invite({ email, displayName, role: role as Role });
+      setInvited(created);
+      if (role === "patient") setPortalUserId(created.id);
       setEmail("");
       setDisplayName("");
     } catch (err) {
@@ -82,6 +89,17 @@ export function UsersPage(): JSX.Element {
       setManageMsg("Usuário desativado.");
     } catch (err) {
       setManageError(usersError(err, "Não foi possível desativar o usuário."));
+    }
+  };
+
+  const linkPatientAccount = async (): Promise<void> => {
+    setLinkError(null);
+    setLinkMsg(null);
+    try {
+      await patients.linkPortalUser(patientId, portalUserId);
+      setLinkMsg("Conta vinculada ao prontuário.");
+    } catch (err) {
+      setLinkError(usersError(err, "Não foi possível vincular a conta ao prontuário."));
     }
   };
 
@@ -118,9 +136,31 @@ export function UsersPage(): JSX.Element {
           />
           <ErrorBanner message={inviteError} />
           {invited ? (
-            <p className="muted">
-              Convite enviado — <StatusBadge status={invited.status} />
-            </p>
+            <div className="notice stack" role="status">
+              <p>
+                Convite criado — <StatusBadge status={invited.status} />
+              </p>
+              <div className="field">
+                <label htmlFor="createdUserId">ID do usuário</label>
+                <input id="createdUserId" value={invited.id} readOnly />
+              </div>
+              <div className="field">
+                <label htmlFor="createdActivationToken">
+                  Token de ativação (exibido uma única vez)
+                </label>
+                <input
+                  id="createdActivationToken"
+                  value={invited.activationToken}
+                  readOnly
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+              </div>
+              <small>
+                Expira em {new Date(invited.activationExpiresAt).toLocaleString("pt-BR")}.
+                Envie por um canal seguro; o sistema não registra o token em texto claro.
+              </small>
+            </div>
           ) : null}
           <button type="submit">Convidar</button>
         </CardForm>
@@ -152,6 +192,38 @@ export function UsersPage(): JSX.Element {
               Desativar
             </button>
           </div>
+        </CardForm>
+
+        <CardForm
+          title="Vincular acesso do paciente"
+          label="Vincular acesso do paciente"
+          onSubmit={linkPatientAccount}
+        >
+          <p className="muted">
+            Associe a conta convidada ao prontuário. O aplicativo usará essa associação
+            para exibir somente os dados do próprio paciente.
+          </p>
+          <Field
+            id="linkPatientId"
+            label="ID do prontuário"
+            value={patientId}
+            onChange={setPatientId}
+            required
+          />
+          <Field
+            id="linkPortalUserId"
+            label="ID do usuário paciente"
+            value={portalUserId}
+            onChange={setPortalUserId}
+            required
+          />
+          <ErrorBanner message={linkError} />
+          {linkMsg ? (
+            <p className="muted" role="status">
+              {linkMsg}
+            </p>
+          ) : null}
+          <button type="submit">Vincular conta</button>
         </CardForm>
       </div>
     </section>
