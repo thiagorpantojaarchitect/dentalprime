@@ -4,7 +4,7 @@
  */
 
 import type { TenantId, UserId } from "@dentalprime/core";
-import { and, desc, eq } from "drizzle-orm";
+import { and, count, desc, eq } from "drizzle-orm";
 
 import type {
   AuditEntry,
@@ -26,6 +26,7 @@ import type {
   ConsentRepository,
   InteractionRepository,
   LeadRepository,
+  LeadStatusCount,
   SegmentRepository,
 } from "../domain/repositories.js";
 import type { Database } from "./db/client.js";
@@ -96,6 +97,15 @@ export class DrizzleLeadRepository implements LeadRepository {
       .from(leads)
       .where(and(eq(leads.tenantId, tenantId), eq(leads.status, status)));
     return rows.map(toLead);
+  }
+
+  async countByStatus(tenantId: TenantId): Promise<LeadStatusCount[]> {
+    const rows = await this.db
+      .select({ status: leads.status, count: count() })
+      .from(leads)
+      .where(eq(leads.tenantId, tenantId))
+      .groupBy(leads.status);
+    return rows.map((row) => ({ status: row.status, count: Number(row.count) }));
   }
 }
 

@@ -12,6 +12,7 @@ import {
 } from "../infrastructure/memory-repositories.js";
 import { AuditService } from "./audit-service.js";
 import { AvailabilityService } from "./availability-service.js";
+import { DashboardService } from "./dashboard-service.js";
 import { InMemoryEventPublisher } from "./event-publisher.js";
 import { ReminderService } from "./reminder-service.js";
 import { SchedulingService } from "./scheduling-service.js";
@@ -70,6 +71,11 @@ export function buildEnv() {
     }),
     waitlist: new WaitlistService({
       waitlist: waitlistRepo,
+      audit,
+      authorization,
+    }),
+    dashboard: new DashboardService({
+      appointments: appointmentRepo,
       audit,
       authorization,
     }),

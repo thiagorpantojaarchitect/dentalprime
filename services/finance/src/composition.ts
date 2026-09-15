@@ -3,6 +3,7 @@
  */
 
 import { AuditService } from "./application/audit-service.js";
+import { DashboardService } from "./application/dashboard-service.js";
 import {
   NoopEventPublisher,
   type EventPublisher,
@@ -75,6 +76,11 @@ export function composeProduction(
     audit,
     authorization,
   });
+  const dashboard = new DashboardService({
+    invoices: invoiceRepo,
+    audit,
+    authorization,
+  });
 
   return {
     connection,
@@ -84,5 +90,6 @@ export function composeProduction(
     plans,
     payouts,
     reconciliation,
+    dashboard,
   };
 }

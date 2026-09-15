@@ -54,6 +54,19 @@ export interface InvoiceRepository {
     tenantId: TenantId,
     sourceTreatmentItemId: string,
   ): Promise<InvoiceItem | null>;
+  /**
+   * Agrega faturas do tenant por status: contagem, total faturado e saldo em
+   * aberto (a receber). Read-only; usado pelo dashboard financeiro.
+   */
+  summarizeByStatus(tenantId: TenantId): Promise<InvoiceStatusSummary[]>;
+}
+
+/** Agregado de faturas para um status (contagem e somas em centavos). */
+export interface InvoiceStatusSummary {
+  readonly status: InvoiceStatus;
+  readonly count: number;
+  readonly amountCents: Cents;
+  readonly balanceCents: Cents;
 }
 
 export interface PaymentRepository {

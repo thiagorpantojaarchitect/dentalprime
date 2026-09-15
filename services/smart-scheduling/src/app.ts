@@ -27,6 +27,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       scheduling: deps.scheduling,
       reminders: deps.reminders,
       waitlist: deps.waitlist,
+      dashboard: deps.dashboard,
     });
   });
 

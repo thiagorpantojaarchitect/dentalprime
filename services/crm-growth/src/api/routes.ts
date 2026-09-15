@@ -8,6 +8,7 @@ import { z } from "zod";
 
 import type { CampaignService, SegmentService } from "../application/campaign-service.js";
 import type { ConsentService } from "../application/consent-service.js";
+import type { DashboardService } from "../application/dashboard-service.js";
 import type { InteractionService, LeadService } from "../application/lead-service.js";
 import { requireContext } from "./auth-plugin.js";
 import { sendError } from "./errors.js";
@@ -69,6 +70,7 @@ export interface RouteServices {
   readonly campaigns: CampaignService;
   readonly segments: SegmentService;
   readonly consent: ConsentService;
+  readonly dashboard: DashboardService;
 }
 
 export async function registerRoutes(
@@ -76,6 +78,21 @@ export async function registerRoutes(
   services: RouteServices,
 ): Promise<void> {
   fastify.get("/health", async () => ({ status: "ok" }));
+
+  // --- Dashboard (somente leitura) ---
+
+  fastify.get(
+    "/dashboard",
+    { preHandler: fastify.authenticate },
+    async (request, reply) => {
+      try {
+        const summary = await services.dashboard.leadFunnel(requireContext(request));
+        return reply.send(summary);
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
 
   // --- Leads ---
 

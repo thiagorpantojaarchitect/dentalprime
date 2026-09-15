@@ -35,6 +35,17 @@ export interface LeadRepository {
     changes: { status?: LeadStatus; patientId?: string | null },
   ): Promise<Lead>;
   listByStatus(tenantId: TenantId, status: LeadStatus): Promise<Lead[]>;
+  /**
+   * Conta os leads do tenant por status. Read-only; usado pelo dashboard de
+   * funil. Retorna apenas os status com ao menos um lead.
+   */
+  countByStatus(tenantId: TenantId): Promise<LeadStatusCount[]>;
+}
+
+/** Contagem de leads para um status. */
+export interface LeadStatusCount {
+  readonly status: LeadStatus;
+  readonly count: number;
 }
 
 export interface InteractionRepository {

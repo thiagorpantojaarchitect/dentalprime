@@ -105,4 +105,42 @@ describe("finance API", () => {
     });
     expect(pay.statusCode).toBe(409);
   });
+
+  it("GET /dashboard exige token e retorna agregado por status", async () => {
+    const noAuth = await app.inject({ method: "GET", url: "/dashboard" });
+    expect(noAuth.statusCode).toBe(401);
+
+    const token = await issueToken(["manager"]);
+    const auth = { authorization: `Bearer ${token}` };
+
+    // Cria e paga uma fatura para haver dado agregado.
+    const inv = await app.inject({
+      method: "POST",
+      url: "/invoices",
+      headers: auth,
+      payload: { patientId: PATIENT_A, unitId: UNIT_A },
+    });
+    const invoiceId = inv.json().id as string;
+    await app.inject({
+      method: "POST",
+      url: `/invoices/${invoiceId}/items`,
+      headers: auth,
+      payload: { description: "Consulta", unitPrice: "150.00" },
+    });
+    await app.inject({
+      method: "POST",
+      url: `/invoices/${invoiceId}/payments`,
+      headers: auth,
+      payload: { amount: "150.00", method: "pix" },
+    });
+
+    const dash = await app.inject({ method: "GET", url: "/dashboard", headers: auth });
+    expect(dash.statusCode).toBe(200);
+    const body = dash.json();
+    expect(body.totalInvoices).toBe(1);
+    expect(body.billedCents).toBe(15000);
+    expect(body.receivedCents).toBe(15000);
+    expect(body.outstandingCents).toBe(0);
+    expect(body.byStatus).toHaveLength(4);
+  });
 });

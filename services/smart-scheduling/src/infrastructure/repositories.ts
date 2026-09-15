@@ -5,7 +5,7 @@
  */
 
 import type { ClinicUnitId, TenantId, UserId } from "@dentalprime/core";
-import { and, eq, gt, lt, ne } from "drizzle-orm";
+import { and, count, eq, gt, gte, lt, ne } from "drizzle-orm";
 
 import type {
   Appointment,
@@ -24,6 +24,7 @@ import type {
 } from "../domain/models.js";
 import type {
   AppointmentRepository,
+  AppointmentStatusCount,
   AuditRepository,
   AvailabilityRepository,
   ProviderRepository,
@@ -234,6 +235,25 @@ export class DrizzleAppointmentRepository implements AppointmentRepository {
       .where(and(eq(appointments.tenantId, tenantId), eq(appointments.id, appointmentId)))
       .returning();
     return toAppointment(rows[0]!);
+  }
+
+  async summarizeByStatusInRange(
+    tenantId: TenantId,
+    from: Date,
+    to: Date,
+  ): Promise<AppointmentStatusCount[]> {
+    const rows = await this.db
+      .select({ status: appointments.status, count: count() })
+      .from(appointments)
+      .where(
+        and(
+          eq(appointments.tenantId, tenantId),
+          gte(appointments.startsAt, from),
+          lt(appointments.startsAt, to),
+        ),
+      )
+      .groupBy(appointments.status);
+    return rows.map((row) => ({ status: row.status, count: Number(row.count) }));
   }
 }
 

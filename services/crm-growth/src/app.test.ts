@@ -88,4 +88,27 @@ describe("crm-growth API", () => {
     });
     expect(res.statusCode).toBe(403);
   });
+
+  it("GET /dashboard exige token e retorna o funil de leads", async () => {
+    const noAuth = await app.inject({ method: "GET", url: "/dashboard" });
+    expect(noAuth.statusCode).toBe(401);
+
+    const token = await issueToken(["manager"]);
+    const auth = { authorization: `Bearer ${token}` };
+
+    // Cria um lead para haver dado no funil.
+    await app.inject({
+      method: "POST",
+      url: "/leads",
+      headers: auth,
+      payload: { name: "Joao" },
+    });
+
+    const dash = await app.inject({ method: "GET", url: "/dashboard", headers: auth });
+    expect(dash.statusCode).toBe(200);
+    const body = dash.json();
+    expect(body.totalLeads).toBe(1);
+    expect(body.funnel).toHaveLength(5);
+    expect(body.conversionRate).toBe(0);
+  });
 });

@@ -28,6 +28,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       campaigns: deps.campaigns,
       segments: deps.segments,
       consent: deps.consent,
+      dashboard: deps.dashboard,
     });
   });
 

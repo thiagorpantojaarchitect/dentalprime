@@ -12,6 +12,7 @@ import {
 import { AuditService } from "./audit-service.js";
 import { CampaignService, SegmentService } from "./campaign-service.js";
 import { ConsentService } from "./consent-service.js";
+import { DashboardService } from "./dashboard-service.js";
 import { InteractionService, LeadService } from "./lead-service.js";
 
 export const TENANT_A = "11111111-1111-1111-1111-111111111111";
@@ -57,5 +58,6 @@ export function buildEnv() {
     }),
     segments: new SegmentService({ segments: segmentRepo, audit, authorization }),
     consent,
+    dashboard: new DashboardService({ leads: leadRepo, audit, authorization }),
   };
 }

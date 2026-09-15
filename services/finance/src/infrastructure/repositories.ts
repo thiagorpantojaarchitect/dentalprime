@@ -4,7 +4,7 @@
  */
 
 import type { TenantId, UserId } from "@dentalprime/core";
-import { and, eq, lt } from "drizzle-orm";
+import { and, count, eq, lt, sum } from "drizzle-orm";
 
 import type { Cents } from "../domain/money.js";
 import type {
@@ -26,6 +26,7 @@ import type {
 import type {
   AuditRepository,
   InvoiceRepository,
+  InvoiceStatusSummary,
   PaymentPlanRepository,
   PaymentRepository,
   PayoutRepository,
@@ -145,6 +146,26 @@ export class DrizzleInvoiceRepository implements InvoiceRepository {
       )
       .limit(1);
     return rows[0] ? toItem(rows[0]) : null;
+  }
+
+  async summarizeByStatus(tenantId: TenantId): Promise<InvoiceStatusSummary[]> {
+    const rows = await this.db
+      .select({
+        status: invoices.status,
+        count: count(),
+        amountCents: sum(invoices.amountCents),
+        balanceCents: sum(invoices.balanceCents),
+      })
+      .from(invoices)
+      .where(eq(invoices.tenantId, tenantId))
+      .groupBy(invoices.status);
+    // `sum` retorna string (ou null quando nao ha linhas); normalizamos para inteiro.
+    return rows.map((row) => ({
+      status: row.status,
+      count: Number(row.count),
+      amountCents: row.amountCents === null ? 0 : Number(row.amountCents),
+      balanceCents: row.balanceCents === null ? 0 : Number(row.balanceCents),
+    }));
   }
 }
 

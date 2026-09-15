@@ -24,6 +24,7 @@ import {
 } from "../domain/models.js";
 import type {
   AppointmentRepository,
+  AppointmentStatusCount,
   AuditRepository,
   AvailabilityRepository,
   ProviderRepository,
@@ -159,6 +160,21 @@ export class InMemoryAppointmentRepository implements AppointmentRepository {
     const updated: Appointment = { ...current, status };
     this.rows.set(appointmentId, updated);
     return updated;
+  }
+
+  async summarizeByStatusInRange(
+    tenantId: TenantId,
+    from: Date,
+    to: Date,
+  ): Promise<AppointmentStatusCount[]> {
+    const counts = new Map<AppointmentStatus, number>();
+    for (const a of this.rows.values()) {
+      if (a.tenantId !== tenantId) continue;
+      const start = a.startsAt.getTime();
+      if (start < from.getTime() || start >= to.getTime()) continue;
+      counts.set(a.status, (counts.get(a.status) ?? 0) + 1);
+    }
+    return [...counts.entries()].map(([status, count]) => ({ status, count }));
   }
 }
 

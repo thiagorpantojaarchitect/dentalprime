@@ -10,6 +10,7 @@ import {
   InMemoryReconciliationRepository,
 } from "../infrastructure/memory-repositories.js";
 import { AuditService } from "./audit-service.js";
+import { DashboardService } from "./dashboard-service.js";
 import { InMemoryEventPublisher } from "./event-publisher.js";
 import { InvoiceService } from "./invoice-service.js";
 import { PaymentPlanService } from "./payment-plan-service.js";
@@ -67,5 +68,6 @@ export function buildEnv() {
       audit,
       authorization,
     }),
+    dashboard: new DashboardService({ invoices: invoiceRepo, audit, authorization }),
   };
 }

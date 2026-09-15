@@ -5,6 +5,7 @@
 import { AuditService } from "./application/audit-service.js";
 import { CampaignService, SegmentService } from "./application/campaign-service.js";
 import { ConsentService } from "./application/consent-service.js";
+import { DashboardService } from "./application/dashboard-service.js";
 import { InteractionService, LeadService } from "./application/lead-service.js";
 import type { Config } from "./config.js";
 import { AuthorizationService } from "./domain/authorization.js";
@@ -52,6 +53,7 @@ export function composeProduction(config: Config): Composition {
     authorization,
   });
   const segments = new SegmentService({ segments: segmentRepo, audit, authorization });
+  const dashboard = new DashboardService({ leads: leadRepo, audit, authorization });
 
   return {
     connection,
@@ -61,5 +63,6 @@ export function composeProduction(config: Config): Composition {
     campaigns,
     segments,
     consent,
+    dashboard,
   };
 }

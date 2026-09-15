@@ -7,6 +7,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
+import type { DashboardService } from "../application/dashboard-service.js";
 import type { InvoiceService } from "../application/invoice-service.js";
 import type { PaymentPlanService } from "../application/payment-plan-service.js";
 import type { PaymentService } from "../application/payment-service.js";
@@ -66,6 +67,7 @@ export interface RouteServices {
   readonly plans: PaymentPlanService;
   readonly payouts: PayoutService;
   readonly reconciliation: ReconciliationService;
+  readonly dashboard: DashboardService;
 }
 
 export async function registerRoutes(
@@ -73,6 +75,21 @@ export async function registerRoutes(
   services: RouteServices,
 ): Promise<void> {
   fastify.get("/health", async () => ({ status: "ok" }));
+
+  // --- Dashboard (somente leitura) ---
+
+  fastify.get(
+    "/dashboard",
+    { preHandler: fastify.authenticate },
+    async (request, reply) => {
+      try {
+        const summary = await services.dashboard.financeSummary(requireContext(request));
+        return reply.send(summary);
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
 
   // --- Faturas ---
 

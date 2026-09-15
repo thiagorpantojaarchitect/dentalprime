@@ -81,6 +81,21 @@ export interface AppointmentRepository {
     appointmentId: AppointmentId,
     status: AppointmentStatus,
   ): Promise<Appointment>;
+  /**
+   * Agrega os agendamentos do tenant por status em uma janela de datas
+   * (por `startsAt`, intervalo [from, to)). Read-only; usado pelo dashboard.
+   */
+  summarizeByStatusInRange(
+    tenantId: TenantId,
+    from: Date,
+    to: Date,
+  ): Promise<AppointmentStatusCount[]>;
+}
+
+/** Contagem de agendamentos para um status. */
+export interface AppointmentStatusCount {
+  readonly status: AppointmentStatus;
+  readonly count: number;
 }
 
 export interface StatusHistoryRepository {

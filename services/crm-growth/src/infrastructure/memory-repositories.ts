@@ -26,6 +26,7 @@ import type {
   ConsentRepository,
   InteractionRepository,
   LeadRepository,
+  LeadStatusCount,
   SegmentRepository,
 } from "../domain/repositories.js";
 
@@ -78,6 +79,15 @@ export class InMemoryLeadRepository implements LeadRepository {
     return [...this.rows.values()].filter(
       (l) => l.tenantId === tenantId && l.status === status,
     );
+  }
+
+  async countByStatus(tenantId: TenantId): Promise<LeadStatusCount[]> {
+    const counts = new Map<LeadStatus, number>();
+    for (const l of this.rows.values()) {
+      if (l.tenantId !== tenantId) continue;
+      counts.set(l.status, (counts.get(l.status) ?? 0) + 1);
+    }
+    return [...counts.entries()].map(([status, count]) => ({ status, count }));
   }
 }
 

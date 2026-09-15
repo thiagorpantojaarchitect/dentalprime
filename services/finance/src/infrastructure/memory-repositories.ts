@@ -27,6 +27,7 @@ import type {
 import type {
   AuditRepository,
   InvoiceRepository,
+  InvoiceStatusSummary,
   PaymentPlanRepository,
   PaymentRepository,
   PayoutRepository,
@@ -119,6 +120,26 @@ export class InMemoryInvoiceRepository implements InvoiceRepository {
       }
     }
     return null;
+  }
+
+  async summarizeByStatus(tenantId: TenantId): Promise<InvoiceStatusSummary[]> {
+    const byStatus = new Map<InvoiceStatus, InvoiceStatusSummary>();
+    for (const inv of this.invoices.values()) {
+      if (inv.tenantId !== tenantId) continue;
+      const current = byStatus.get(inv.status) ?? {
+        status: inv.status,
+        count: 0,
+        amountCents: 0,
+        balanceCents: 0,
+      };
+      byStatus.set(inv.status, {
+        status: inv.status,
+        count: current.count + 1,
+        amountCents: current.amountCents + inv.amountCents,
+        balanceCents: current.balanceCents + inv.balanceCents,
+      });
+    }
+    return [...byStatus.values()];
   }
 }
 

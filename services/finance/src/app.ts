@@ -28,6 +28,7 @@ export async function buildApp(deps: AppDeps): Promise<FastifyInstance> {
       plans: deps.plans,
       payouts: deps.payouts,
       reconciliation: deps.reconciliation,
+      dashboard: deps.dashboard,
     });
   });
 

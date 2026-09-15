@@ -87,4 +87,48 @@ describe("smart-scheduling API", () => {
     });
     expect(res.statusCode).toBe(400);
   });
+
+  it("GET /dashboard exige token, valida query e agrega por status", async () => {
+    const noAuth = await app.inject({ method: "GET", url: "/dashboard" });
+    expect(noAuth.statusCode).toBe(401);
+
+    const token = await issueToken(["manager"]);
+    const auth = { authorization: `Bearer ${token}` };
+
+    // Query sem from/to: 400.
+    const badQuery = await app.inject({
+      method: "GET",
+      url: "/dashboard",
+      headers: auth,
+    });
+    expect(badQuery.statusCode).toBe(400);
+
+    // Agenda e marca comparecimento.
+    const booked = await app.inject({
+      method: "POST",
+      url: "/appointments",
+      headers: auth,
+      payload: { patientId, providerId, unitId: UNIT_A, startsAt: T(9), endsAt: T(10) },
+    });
+    const appointmentId = booked.json().id as string;
+    await app.inject({
+      method: "POST",
+      url: `/appointments/${appointmentId}/status`,
+      headers: auth,
+      payload: { status: "attended" },
+    });
+
+    const from = "2026-03-10T00:00:00.000Z";
+    const dto = "2026-03-11T00:00:00.000Z";
+    const dash = await app.inject({
+      method: "GET",
+      url: `/dashboard?from=${from}&to=${dto}`,
+      headers: auth,
+    });
+    expect(dash.statusCode).toBe(200);
+    const body = dash.json();
+    expect(body.total).toBe(1);
+    expect(body.attendanceRate).toBe(1);
+    expect(body.byStatus).toHaveLength(5);
+  });
 });

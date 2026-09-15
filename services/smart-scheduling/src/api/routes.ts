@@ -7,6 +7,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
 import type { AvailabilityService } from "../application/availability-service.js";
+import type { DashboardService } from "../application/dashboard-service.js";
 import type { ReminderService } from "../application/reminder-service.js";
 import type { SchedulingService } from "../application/scheduling-service.js";
 import type { WaitlistService } from "../application/waitlist-service.js";
@@ -58,6 +59,11 @@ const waitlistSchema = z.object({
 const appointmentIdParam = z.object({ appointmentId: z.string().uuid() });
 const providerIdParam = z.object({ providerId: z.string().uuid() });
 
+const dashboardQuerySchema = z.object({
+  from: z.string().datetime(),
+  to: z.string().datetime(),
+});
+
 const validationError = { error: { code: "VALIDATION", message: "Dados invalidos." } };
 
 export interface RouteServices {
@@ -65,6 +71,7 @@ export interface RouteServices {
   readonly scheduling: SchedulingService;
   readonly reminders: ReminderService;
   readonly waitlist: WaitlistService;
+  readonly dashboard: DashboardService;
 }
 
 export async function registerRoutes(
@@ -72,6 +79,27 @@ export async function registerRoutes(
   services: RouteServices,
 ): Promise<void> {
   fastify.get("/health", async () => ({ status: "ok" }));
+
+  // --- Dashboard (somente leitura) ---
+
+  fastify.get(
+    "/dashboard",
+    { preHandler: fastify.authenticate },
+    async (request, reply) => {
+      const query = dashboardQuerySchema.safeParse(request.query);
+      if (!query.success) return reply.status(400).send(validationError);
+      try {
+        const summary = await services.dashboard.schedulingSummary(
+          requireContext(request),
+          new Date(query.data.from),
+          new Date(query.data.to),
+        );
+        return reply.send(summary);
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    },
+  );
 
   // --- Disponibilidade ---
 
